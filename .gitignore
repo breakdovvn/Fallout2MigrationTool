@@ -1,7 +1,15 @@
+# Сборка
 build/
-imgui.ini
+bin/
+obj/
 *.user
 *.suo
 .vs/
-bin/
-obj/
+*.pdb
+*.ilk
+
+# Состояние UI
+imgui.ini
+
+# Рабочие данные проектов миграции (распакованные из .dat и результаты разбора)
+projects/

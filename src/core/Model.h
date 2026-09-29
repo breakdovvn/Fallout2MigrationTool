@@ -43,6 +43,9 @@ struct ProtoRef {
 
 struct InventoryEntry {
     ProtoRef proto;
+    uint8_t fidType = 0;   // арт предмета внутри контейнера
+    uint16_t fidNum = 0;
+    uint32_t textId = 0;   // TextId прототипа предмета (описание)
     int32_t amount = 0;
     int parentId = -1;
 };
@@ -58,8 +61,11 @@ struct Entity {
     int32_t dir = -1;         // hex 0..5, -1 = нет
     int32_t frame = 0;
     uint32_t flags = 0;
+    uint32_t textId = 0;      // TextId прототипа (для описания из .msg)
     int32_t scriptId = 0;
     int32_t objectPos = -1;   // сырая позиция, -1 = пустая ячейка
+    uint8_t fidType = 0;      // FID (арт): 0 items,1 critters,2 scenery,3 walls,4 tiles,...
+    uint16_t fidNum = 0;
     int32_t lightRadius = 0;
     int32_t lightIntensity = 0;
     uint32_t outlineColor = 0;
@@ -81,6 +87,22 @@ struct Entity {
     std::vector<InventoryEntry> inventory;
     std::string targetProto;  // имя целевого прототипа FOnline (пусто до маппинга)
     SourceRef source;
+
+    // Флаги объекта Fallout 2 (obj_types.h).
+    static constexpr uint32_t kFlagFlat = 0x08;
+    static constexpr uint32_t kFlagNoBlock = 0x10;
+    static constexpr uint32_t kFlagShootThru = 0x80000000u;
+
+    bool isFlat() const { return (flags & kFlagFlat) != 0; }
+    bool isNoBlock() const { return (flags & kFlagNoBlock) != 0; }
+    bool isShootThru() const { return (flags & kFlagShootThru) != 0; }
+
+    // Непроходимое препятствие (для Pip-Boy automap).
+    bool isBlocking() const {
+        if (kind == ProtoType::Wall) return !isNoBlock();
+        if (kind == ProtoType::Scenery) return !isFlat() && !isNoBlock() && !isShootThru();
+        return false;
+    }
 };
 
 struct TileCell {

@@ -30,7 +30,12 @@ SourceRef refFromJson(const json& j) {
 json entityToJson(const Entity& e) {
     json inv = json::array();
     for (const auto& i : e.inventory) {
-        inv.push_back(json{{"type", i.proto.type}, {"num", i.proto.num}, {"amount", i.amount}});
+        inv.push_back(json{{"type", i.proto.type},
+                            {"num", i.proto.num},
+                            {"fidType", i.fidType},
+                            {"fidNum", i.fidNum},
+                            {"textId", i.textId},
+                            {"amount", i.amount}});
     }
     return json{
         {"id", e.localId},
@@ -43,8 +48,11 @@ json entityToJson(const Entity& e) {
         {"dir", e.dir},
         {"frame", e.frame},
         {"flags", e.flags},
+        {"textId", e.textId},
         {"scriptId", e.scriptId},
         {"objectPos", e.objectPos},
+        {"fidType", e.fidType},
+        {"fidNum", e.fidNum},
         {"lightRadius", e.lightRadius},
         {"lightIntensity", e.lightIntensity},
         {"isExit", e.isExit},
@@ -68,8 +76,11 @@ Entity entityFromJson(const json& j) {
     e.dir = j.value("dir", -1);
     e.frame = j.value("frame", 0);
     e.flags = j.value("flags", 0u);
+    e.textId = j.value("textId", 0u);
     e.scriptId = j.value("scriptId", 0);
     e.objectPos = j.value("objectPos", -1);
+    e.fidType = static_cast<uint8_t>(j.value("fidType", 0));
+    e.fidNum = static_cast<uint16_t>(j.value("fidNum", 0));
     e.lightRadius = j.value("lightRadius", 0);
     e.lightIntensity = j.value("lightIntensity", 0);
     e.isExit = j.value("isExit", false);
@@ -82,6 +93,9 @@ Entity entityFromJson(const json& j) {
             InventoryEntry entry;
             entry.proto.type = static_cast<uint8_t>(i.value("type", 0));
             entry.proto.num = static_cast<uint16_t>(i.value("num", 0));
+            entry.fidType = static_cast<uint8_t>(i.value("fidType", 0));
+            entry.fidNum = static_cast<uint16_t>(i.value("fidNum", 0));
+            entry.textId = i.value("textId", 0u);
             entry.amount = i.value("amount", 0);
             e.inventory.push_back(entry);
         }
@@ -210,9 +224,16 @@ bool MigrationProject::loadLocation(Location& loc) const {
 }
 
 bool MigrationProject::saveState(const ProjectState& st) const {
-    json j{{"zoom", st.zoom},       {"panX", st.panX},         {"panY", st.panY},
-           {"selected", st.selectedEntity}, {"elevation", st.elevation},
-           {"showTiles", st.showTiles}, {"showEntities", st.showEntities}};
+    json j{{"zoom", st.zoom},
+           {"panX", st.panX},
+           {"panY", st.panY},
+           {"selected", st.selectedEntity},
+           {"elevation", st.elevation},
+           {"showRoofs", st.showRoofs},
+           {"langRu", st.langRu},
+           {"showExits", st.showExits},
+           {"showContents", st.showContents},
+           {"kindMask", st.kindMask}};
     std::ofstream out(stateFile());
     if (!out) return false;
     out << j.dump(1);
@@ -233,8 +254,11 @@ bool MigrationProject::loadState(ProjectState& st) const {
     st.panY = j.value("panY", st.panY);
     st.selectedEntity = j.value("selected", -1);
     st.elevation = j.value("elevation", 0);
-    st.showTiles = j.value("showTiles", true);
-    st.showEntities = j.value("showEntities", true);
+    st.showRoofs = j.value("showRoofs", false);
+    st.langRu = j.value("langRu", true);
+    st.showExits = j.value("showExits", true);
+    st.showContents = j.value("showContents", false);
+    st.kindMask = j.value("kindMask", 0x3F);
     return true;
 }
 

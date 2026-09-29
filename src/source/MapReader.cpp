@@ -154,8 +154,8 @@ bool MapReader::read(const std::string& mapPath, const std::string& containerFil
             r.u32(); r.u32(); r.u32(); r.u32();
             e.frame = static_cast<int32_t>(r.u32());
             e.dir = static_cast<int32_t>(r.u32());
-            r.u8(); r.u8();
-            r.u16();  // FID
+            e.fidType = r.u8(); r.u8();
+            e.fidNum = r.u16();
             e.flags = r.u32();
             const int32_t objElev = r.i32();
             const uint8_t pidType = r.u8(); r.u8();
@@ -173,6 +173,7 @@ bool MapReader::read(const std::string& mapPath, const std::string& containerFil
             e.proto.type = pidType;
             e.proto.num = pidNum;
             e.kind = toKind(pidType);
+            if (const ProtoInfo* pi = resolver.infoFor(pidType, pidNum)) e.textId = pi->textId;
             e.source.containerFile = containerFile;
             e.source.entryPath = sourceEntry;
             e.source.byteOffset = offset;
@@ -260,7 +261,8 @@ bool MapReader::read(const std::string& mapPath, const std::string& containerFil
                 r.u32(); r.u32(); r.u32(); r.u32();
                 sub.frame = static_cast<int32_t>(r.u32());
                 sub.dir = static_cast<int32_t>(r.u32());
-                r.u8(); r.u8(); r.u16();
+                sub.fidType = r.u8(); r.u8();
+                sub.fidNum = r.u16();
                 sub.flags = r.u32();
                 const int32_t subElev = r.i32();
                 const uint8_t subType = r.u8(); r.u8();
@@ -297,6 +299,13 @@ bool MapReader::read(const std::string& mapPath, const std::string& containerFil
                     }
                 }
                 sub.localId = nextLocalId++;
+                entry.proto.type = sub.proto.type;
+                entry.proto.num = sub.proto.num;
+                entry.fidType = sub.fidType;
+                entry.fidNum = sub.fidNum;
+                if (const ProtoInfo* spi = resolver.infoFor(sub.proto.type, sub.proto.num)) {
+                    entry.textId = spi->textId;
+                }
                 if (entry.parentId >= 0) {
                     for (auto& parent : out.entities) {
                         if (parent.localId == entry.parentId) {

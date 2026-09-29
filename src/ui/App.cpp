@@ -6,12 +6,14 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <string>
 
 #include <imgui.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_impl_sdlrenderer2.h>
 
+#include "source/ByteReader.h"
 #include "source/DatProvisioner.h"
 #include "source/MapReader.h"
 
@@ -52,7 +54,17 @@ int App::run(const AppConfig& cfg) {
     } else {
         _status = "OK: " + _loc.mapName;
     }
+    if (ensureArt()) {
+        Palette pal;
+        pal.load((std::filesystem::path(_project.sourceRawDir()) / "color.pal").string());
+        _sprites.init(_renderer, _project.sourceRawDir(), _cfg.dat2Exe, _cfg.gameDat, _cfg.critterDat,
+                      pal);
+        _sprites.ensureMapArts(_loc);
+        loadProtoMsgs();
+    }
     loadMapList();
+    _targetDir = _cfg.targetMapsDir;
+    loadTargetList();
 
     _project.loadState(_state);
     _project.saveState(_state);  // создаём файл состояния сразу (persistence)
@@ -249,7 +261,219 @@ bool App::parseSource() {
     _loc.id = _cfg.locationId;
     if (_loc.displayName.empty()) _loc.displayName = _cfg.locationId;
     _fitPending = true;
+    _gameCache.valid = false;  // пересобрать список спрайтов
     return true;
+}
+
+bool App::ensureArt() {
+    const std::filesystem::path raw(_project.sourceRawDir());
+    const bool ruOk = _cfg.russianDat.empty() ||
+                      std::filesystem::exists(raw / "text/russian/game/pro_item.msg");
+    if (std::filesystem::exists(raw / "art/tiles/TILES.LST") &&
+        std::filesystem::exists(raw / "color.pal") &&
+        std::filesystem::exists(raw / "text/english/game/pro_item.msg") && ruOk) {
+        return true;
+    }
+    DatProvisioner master(_cfg.dat2Exe, _cfg.gameDat, raw.string());
+    master.extract({"color.pal",
+                    "art\\tiles\\TILES.LST",
+                    "art\\items\\ITEMS.LST",
+                    "art\\scenery\\SCENERY.LST",
+                    "art\\walls\\WALLS.LST",
+                    "art\\misc\\MISC.LST",
+                    "art\\backgrnd\\BACKGRND.LST",
+                    "art\\inven\\INVEN.LST",
+                    "art\\intrface\\INTRFACE.LST",
+                    "text\\english\\game\\pro_item.msg",
+                    "text\\english\\game\\pro_crit.msg",
+                    "text\\english\\game\\pro_scen.msg",
+                    "text\\english\\game\\pro_wall.msg",
+                    "text\\english\\game\\pro_tile.msg",
+                    "text\\english\\game\\pro_misc.msg"});
+    if (std::filesystem::exists(_cfg.critterDat)) {
+        DatProvisioner crit(_cfg.dat2Exe, _cfg.critterDat, raw.string());
+        crit.extract({"art\\critters\\CRITTERS.LST"});
+    }
+    // Русские тексты прототипов из отдельного (русского) master.dat, если задан.
+    if (!_cfg.russianDat.empty() && std::filesystem::exists(_cfg.russianDat)) {
+        DatProvisioner ru(_cfg.dat2Exe, _cfg.russianDat, raw.string());
+        ru.extract({"text\\russian\\game\\pro_item.msg", "text\\russian\\game\\pro_crit.msg",
+                    "text\\russian\\game\\pro_scen.msg", "text\\russian\\game\\pro_wall.msg",
+                    "text\\russian\\game\\pro_tile.msg", "text\\russian\\game\\pro_misc.msg"});
+    }
+    return std::filesystem::exists(raw / "art/tiles/TILES.LST");
+}
+
+void App::loadTargetList() {
+    _targetFiles.clear();
+    std::error_code ec;
+    if (!std::filesystem::exists(_targetDir, ec)) return;
+    for (const auto& e : std::filesystem::directory_iterator(_targetDir, ec)) {
+        if (!e.is_regular_file()) continue;
+        std::string ext = e.path().extension().string();
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".fomap") _targetFiles.push_back(e.path().filename().string());
+    }
+    std::sort(_targetFiles.begin(), _targetFiles.end());
+}
+
+void App::selectTarget(const std::string& file) {
+    const std::string path = (std::filesystem::path(_targetDir) / file).string();
+    if (loadFomap(path, _target)) {
+        _target.loaded = true;
+        _status = "Target: " + _target.name + " (" + std::to_string(_target.objects.size()) + ")";
+    }
+}
+
+void App::drawTarget() {
+    ImGui::TextUnformatted("Target (FOnline .fomap)");
+    if (!_target.loaded) {
+        ImGui::TextDisabled("Выберите .fomap слева.");
+        return;
+    }
+    ImGui::Text("%s", _target.name.c_str());
+    ImGui::Text("Size: %d %d   WorkHex: %d %d", _target.sizeX, _target.sizeY, _target.workX,
+                _target.workY);
+    int items = 0, critters = 0;
+    for (const auto& o : _target.objects) {
+        (o.critter ? critters : items)++;
+    }
+    ImGui::Text("objects: %zu (items %d, critters %d)", _target.objects.size(), items, critters);
+
+    std::map<std::string, int> byProto;
+    for (const auto& o : _target.objects) byProto[o.proto]++;
+    if (ImGui::BeginTable("tprotos", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
+                                           ImGuiTableFlags_ScrollY)) {
+        ImGui::TableSetupColumn("proto");
+        ImGui::TableSetupColumn("n");
+        ImGui::TableHeadersRow();
+        for (const auto& kv : byProto) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(kv.first.c_str());
+            ImGui::TableSetColumnIndex(1);
+            ImGui::Text("%d", kv.second);
+        }
+        ImGui::EndTable();
+    }
+}
+
+void App::buildMapIndex() {
+    _mapIndex.clear();
+    const std::filesystem::path raw(_project.sourceRawDir());
+    std::vector<std::string> need;
+    for (const auto& m : _availableMaps) {
+        if (!std::filesystem::exists(raw / m)) need.push_back(m);
+    }
+    if (!need.empty()) {
+        DatProvisioner prov(_cfg.dat2Exe, _cfg.gameDat, raw.string());
+        prov.extract(need);
+    }
+    for (const auto& m : _availableMaps) {
+        ByteReader r;
+        if (!r.load((raw / m).string())) continue;
+        r.seek(52);  // MapId
+        const int32_t id = r.i32();
+        if (id >= 0) _mapIndex[id] = m;
+    }
+}
+
+std::string App::mapEntryForId(int id) {
+    if (_mapIndex.empty()) buildMapIndex();
+    const auto it = _mapIndex.find(id);
+    return it != _mapIndex.end() ? it->second : std::string{};
+}
+
+void App::loadProtoMsgs() {
+    static const char* kNames[6] = {"pro_item", "pro_crit", "pro_scen",
+                                    "pro_wall", "pro_tile", "pro_misc"};
+    const std::filesystem::path raw = _project.sourceRawDir();
+    const std::filesystem::path en = raw / "text/english/game";
+    for (int i = 0; i < 6; ++i) {
+        _protoMsgEn[i].load((en / (std::string(kNames[i]) + ".msg")).string());
+    }
+    // Русский источник: явный каталог или распакованный text/russian/game.
+    std::filesystem::path ru = raw / "text/russian/game";
+    if (!_cfg.russianTextDir.empty()) ru = std::filesystem::path(_cfg.russianTextDir);
+    for (int i = 0; i < 6; ++i) {
+        const std::filesystem::path f = ru / (std::string(kNames[i]) + ".msg");
+        if (std::filesystem::exists(f)) _protoMsgRu[i].load(f.string());
+    }
+}
+
+std::string App::nameProto(uint8_t type, uint32_t textId) const {
+    if (type >= 6 || textId == 0) return {};
+    const int id = static_cast<int>(textId);
+    if (_state.langRu) {
+        if (const std::string* s = _protoMsgRu[type].get(id)) return *s;
+    }
+    if (const std::string* s = _protoMsgEn[type].get(id)) return *s;
+    if (const std::string* s = _protoMsgRu[type].get(id)) return *s;
+    return {};
+}
+
+std::string App::descProto(uint8_t type, uint32_t textId) const {
+    if (type >= 6 || textId == 0) return {};
+    const int id = static_cast<int>(textId) + 1;  // описание = TextId+1
+    if (_state.langRu) {
+        if (const std::string* s = _protoMsgRu[type].get(id)) return *s;
+    }
+    if (const std::string* s = _protoMsgEn[type].get(id)) return *s;
+    if (const std::string* s = _protoMsgRu[type].get(id)) return *s;
+    return {};
+}
+
+std::string App::nameOf(const Entity& e) const { return nameProto(e.proto.type, e.textId); }
+
+std::string App::describe(const Entity& e) const { return descProto(e.proto.type, e.textId); }
+
+void App::drawInventoryPopup() {
+    if (!_selOnScreen || _state.selectedEntity <= 0 || _invOpenFor != _state.selectedEntity) return;
+    const Entity* e = nullptr;
+    for (const auto& x : _loc.entities) {
+        if (x.localId == _state.selectedEntity) { e = &x; break; }
+    }
+    if (e == nullptr || e->inventory.empty()) return;
+
+    ImGui::SetNextWindowPos(ImVec2(_selScreenX + 34.0f, _selScreenY - 60.0f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowBgAlpha(0.93f);
+    char title[64];
+    std::snprintf(title, sizeof(title), "Инвентарь##inv%d", e->localId);
+    if (!ImGui::Begin(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextDisabled("id %d   предметов: %zu", e->localId, e->inventory.size());
+    const float icon = 40.0f;
+    int i = 0;
+    for (const auto& inv : e->inventory) {
+        const auto s = _sprites.sprite(inv.fidType, inv.fidNum, 0, 0);
+        ImGui::PushID(i);
+        ImGui::BeginGroup();
+        if (s.tex != nullptr) {
+            if (ImGui::ImageButton("ic", (ImTextureID)(intptr_t)s.tex, ImVec2(icon, icon))) {
+                _inspectedParent = e->localId;
+                _inspectedIndex = i;
+            }
+        } else if (ImGui::Button("##ic", ImVec2(icon, icon))) {
+            _inspectedParent = e->localId;
+            _inspectedIndex = i;
+        }
+        if (ImGui::IsItemHovered()) {
+            const std::string art = _sprites.artName(inv.fidType, inv.fidNum);
+            ImGui::SetTooltip("PID %u:%u  x%d\n%s  (двойной клик — в инспектор)", inv.proto.type,
+                              inv.proto.num, inv.amount, art.c_str());
+        }
+        char cnt[16];
+        std::snprintf(cnt, sizeof(cnt), "x%d", inv.amount);
+        ImGui::TextDisabled("%s", cnt);
+        ImGui::EndGroup();
+        ImGui::PopID();
+        if ((i % 5) != 4) ImGui::SameLine();
+        ++i;
+    }
+    ImGui::End();
 }
 
 void App::loadMapList() {
@@ -275,6 +499,7 @@ void App::selectMap(const std::string& entry) {
 
     if (parseSource()) {
         if (_state.elevation >= _loc.grid.elevationCount) _state.elevation = 0;
+        _sprites.ensureMapArts(_loc);  // батч-предзагрузка арта новой карты
         _status = "Загружена карта: " + _loc.mapName;
     }
 }
@@ -297,6 +522,14 @@ void App::drawUi() {
     ImGui::BeginChild("left", ImVec2(kLeftW, avail), true);
     drawMapBrowser();
     ImGui::Separator();
+    ImGui::Text("Target .fomap: %zu", _targetFiles.size());
+    ImGui::BeginChild("tgtlist", ImVec2(0, 120), true);
+    for (const auto& f : _targetFiles) {
+        const bool sel = _target.loaded && (_target.name + ".fomap" == f || f.find(_target.name) != std::string::npos);
+        if (ImGui::Selectable(f.c_str(), sel)) selectTarget(f);
+    }
+    ImGui::EndChild();
+    ImGui::Separator();
     drawObjectList();
     ImGui::EndChild();
     ImGui::SameLine();
@@ -308,6 +541,8 @@ void App::drawUi() {
     drawInspector();
     ImGui::Separator();
     drawIssues();
+    ImGui::Separator();
+    drawTarget();
     ImGui::EndChild();
 
     ImGui::End();
@@ -321,9 +556,25 @@ void App::drawToolbar() {
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(0.6f, 0.9f, 0.6f, 1.0f), "%s", _status.c_str());
 
-    ImGui::Checkbox("Тайлы", &_state.showTiles);
+    ImGui::Checkbox("Крыши", &_state.showRoofs);
     ImGui::SameLine();
-    ImGui::Checkbox("Объекты", &_state.showEntities);
+    ImGui::Checkbox("Сетки", &_state.showExits);
+    ImGui::SameLine();
+    ImGui::TextUnformatted("Язык:");
+    ImGui::SameLine();
+    if (ImGui::RadioButton("EN", !_state.langRu)) _state.langRu = false;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("RU", _state.langRu)) _state.langRu = true;
+    ImGui::SameLine();
+    const char* kn[6] = {"предм", "NPC", "сцен", "стены", "тайлы", "проч"};
+    for (int k = 0; k < 6; ++k) {
+        bool v = (_state.kindMask & (1 << k)) != 0;
+        if (ImGui::Checkbox(kn[k], &v)) {
+            if (v) _state.kindMask |= (1 << k);
+            else _state.kindMask &= ~(1 << k);
+        }
+        if (k < 5) ImGui::SameLine();
+    }
     ImGui::SameLine();
     if (ImGui::Button("Вписать")) {
         _fitPending = true;
@@ -336,53 +587,103 @@ void App::drawToolbar() {
     if (_loc.grid.elevationCount > 1) {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(120);
-        ImGui::SliderInt("Elevation", &_state.elevation, 0, _loc.grid.elevationCount - 1);
+        if (ImGui::SliderInt("Elevation", &_state.elevation, 0, _loc.grid.elevationCount - 1)) {
+            _gameCache.valid = false;
+            _fitPending = true;
+        }
     }
 }
 
 void App::drawObjectList() {
-    ImGui::TextUnformatted("Объекты");
-    static const char* kinds[] = {"Все", "Item", "Critter", "Scenery", "Wall", "Tile", "Misc"};
-    ImGui::SetNextItemWidth(-1);
-    ImGui::Combo("##kind", &_kindFilter, kinds, IM_ARRAYSIZE(kinds));
-
+    ImGui::TextUnformatted("Объекты (по категориям)");
     ImGui::BeginChild("objlist", ImVec2(0, 0), false);
-    if (ImGui::BeginTable("objects", 5,
-                          ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY)) {
-        ImGui::TableSetupColumn("id");
-        ImGui::TableSetupColumn("kind");
-        ImGui::TableSetupColumn("pid");
-        ImGui::TableSetupColumn("xy");
-        ImGui::TableSetupColumn("E");
-        ImGui::TableHeadersRow();
 
+    static const char* kCat[6] = {"Items", "Critters", "Scenery", "Walls", "Tiles", "Misc"};
+    for (int k = 0; k < 6; ++k) {
+        int count = 0;
         for (const auto& e : _loc.entities) {
-            if (_kindFilter > 0 && static_cast<int>(e.kind) != _kindFilter - 1) continue;
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0);
-            ImGui::PushID(e.localId);
-            if (ImGui::Selectable(std::to_string(e.localId).c_str(),
-                                  e.localId == _state.selectedEntity,
-                                  ImGuiSelectableFlags_SpanAllColumns)) {
-                _state.selectedEntity = e.localId;
-            }
-            ImGui::PopID();
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(kindName(e.kind));
-            ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(pidString(e.proto).c_str());
-            ImGui::TableSetColumnIndex(3);
-            ImGui::Text("%d,%d", e.x, e.y);
-            ImGui::TableSetColumnIndex(4);
-            ImGui::Text("%d", e.elevation);
+            if (static_cast<int>(e.kind) == k) ++count;
         }
-        ImGui::EndTable();
+        if (count == 0) continue;
+
+        ImGui::PushID(k);
+        char catLabel[64];
+        std::snprintf(catLabel, sizeof(catLabel), "%s (%d)", kCat[k], count);
+        if (ImGui::CollapsingHeader(catLabel, ImGuiTreeNodeFlags_DefaultOpen)) {
+            // Подгруппы по прототипу (PID).
+            std::map<uint32_t, std::vector<const Entity*>> byPid;
+            for (const auto& e : _loc.entities) {
+                if (static_cast<int>(e.kind) == k) byPid[e.proto.raw()].push_back(&e);
+            }
+            for (auto& kv : byPid) {
+                const ProtoRef pid{static_cast<uint8_t>(kv.first >> 24),
+                                   static_cast<uint16_t>(kv.first & 0xFFFF)};
+                char protoLabel[64];
+                std::snprintf(protoLabel, sizeof(protoLabel), "PID %u:%u  (%zu)", pid.type, pid.num,
+                              kv.second.size());
+                if (ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(kv.first)),
+                                      ImGuiTreeNodeFlags_SpanAvailWidth, "%s", protoLabel)) {
+                    for (const Entity* e : kv.second) {
+                        char lbl[64];
+                        std::snprintf(lbl, sizeof(lbl), "#%d  (%d,%d)", e->localId, e->x, e->y);
+                        ImGui::PushID(e->localId);
+                        if (ImGui::Selectable(lbl, e->localId == _state.selectedEntity)) {
+                            _state.selectedEntity = e->localId;
+                            _centerOnSelected = true;
+                        }
+                        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                            _state.selectedEntity = e->localId;
+                            _invOpenFor = e->localId;  // двойной клик в списке — окно с иконками
+                        }
+                        if (e->localId == _state.selectedEntity && _scrollListToSelected) {
+                            ImGui::SetScrollHereY(0.5f);
+                            _scrollListToSelected = false;
+                        }
+                        ImGui::PopID();
+                    }
+                    ImGui::TreePop();
+                }
+            }
+        }
+        ImGui::PopID();
     }
     ImGui::EndChild();
 }
 
 void App::drawInspector() {
     ImGui::TextUnformatted("Inspector");
+
+    // Выбранный предмет из инвентаря (двойной клик по иконке).
+    if (_inspectedParent >= 0) {
+        const Entity* p = nullptr;
+        for (const auto& it : _loc.entities) {
+            if (it.localId == _inspectedParent) { p = &it; break; }
+        }
+        if (p != nullptr && _inspectedIndex >= 0 &&
+            _inspectedIndex < static_cast<int>(p->inventory.size())) {
+            const InventoryEntry& it = p->inventory[_inspectedIndex];
+            ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.4f, 1.0f), "Предмет из инвентаря #%d",
+                               p->localId);
+            ImGui::Text("PID %u:%u   x%d", it.proto.type, it.proto.num, it.amount);
+            const std::string art = _sprites.artName(it.fidType, it.fidNum);
+            ImGui::Text("FID %u:%u  (%s)", it.fidType, it.fidNum, art.c_str());
+            const std::string nm = nameProto(it.proto.type, it.textId);
+            const std::string d = descProto(it.proto.type, it.textId);
+            if (!nm.empty()) {
+                ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.75f, 1.0f), "Название: %s", nm.c_str());
+            }
+            if (!d.empty()) ImGui::TextWrapped("%s", d.c_str());
+            if (ImGui::Button("закрыть предмет")) {
+                _inspectedParent = -1;
+                _inspectedIndex = -1;
+            }
+            ImGui::Separator();
+        } else {
+            _inspectedParent = -1;
+            _inspectedIndex = -1;
+        }
+    }
+
     const Entity* e = nullptr;
     for (const auto& it : _loc.entities) {
         if (it.localId == _state.selectedEntity) { e = &it; break; }
@@ -408,7 +709,19 @@ void App::drawInspector() {
                            e->exitKind, e->exitDestMap, e->exitDestHex);
     }
     if (!e->inventory.empty()) {
-        ImGui::Text("inventory: %zu", e->inventory.size());
+        char invHdr[48];
+        std::snprintf(invHdr, sizeof(invHdr), "Содержимое (%zu)", e->inventory.size());
+        if (ImGui::TreeNode(invHdr)) {
+            int i = 0;
+            for (const auto& inv : e->inventory) {
+                const std::string art = _sprites.artName(inv.fidType, inv.fidNum);
+                ImGui::PushID(i++);
+                ImGui::BulletText("PID %u:%u  x%d  (%s)", inv.proto.type, inv.proto.num, inv.amount,
+                                  art.empty() ? "?" : art.c_str());
+                ImGui::PopID();
+            }
+            ImGui::TreePop();
+        }
     }
     ImGui::Separator();
     ImGui::TextUnformatted("sourceRef:");
@@ -417,6 +730,21 @@ void App::drawInspector() {
     ImGui::Text("  offset: %zu", static_cast<size_t>(e->source.byteOffset));
     ImGui::Separator();
     ImGui::Text("target proto: %s", e->targetProto.empty() ? "(нет маппинга)" : e->targetProto.c_str());
+
+    {
+        const std::string nm = nameOf(*e);
+        const std::string desc = describe(*e);
+        if (!nm.empty() || !desc.empty()) {
+            ImGui::Separator();
+            if (!nm.empty()) {
+                ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.75f, 1.0f), "Название: %s", nm.c_str());
+            }
+            if (!desc.empty()) {
+                ImGui::TextDisabled("Описание (textId %u):", e->textId);
+                ImGui::TextWrapped("%s", desc.c_str());
+            }
+        }
+    }
 }
 
 void App::drawIssues() {
@@ -448,8 +776,20 @@ void App::drawMapCanvas() {
     const ImVec2 canvasSize = ImGui::GetContentRegionAvail();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
 
-    if (_fitPending) {
-        fitCameraForMap(_loc, canvasSize.x, canvasSize.y, _cam);
+    if (_fitPending && canvasSize.x > 80.0f && canvasSize.y > 80.0f) {
+        buildGameCache(_loc, _state.elevation, _state.kindMask, _state.showContents, &_sprites,
+                       _gameCache);
+        float bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
+        if (gameFitBounds(_gameCache, bx0, by0, bx1, by1)) {
+            const float w = bx1 - bx0;
+            const float h = by1 - by0;
+            if (w > 1.0f && h > 1.0f) {
+                _cam.zoom = std::clamp(std::min((canvasSize.x - 40.0f) / w, (canvasSize.y - 40.0f) / h),
+                                       0.02f, 4.0f);
+                _cam.panX = (canvasSize.x - (bx0 + bx1) * _cam.zoom) * 0.5f;
+                _cam.panY = (canvasSize.y - (by0 + by1) * _cam.zoom) * 0.5f;
+            }
+        }
         _fitPending = false;
     }
 
@@ -477,38 +817,92 @@ void App::drawMapCanvas() {
     }
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    drawMap(dl, origin, canvasSize.x, canvasSize.y, _loc, _state, _cam);
-    drawLegend(origin, canvasSize.y);
+    drawMap(dl, origin, canvasSize.x, canvasSize.y, _loc, _state, _cam, &_sprites, _gameCache);
+
+    // Экранная позиция выбранного объекта (для окна инвентаря).
+    _selOnScreen = false;
+    if (_state.selectedEntity > 0) {
+        for (const auto& e : _loc.entities) {
+            if (e.localId != _state.selectedEntity) continue;
+            float wx = 0, wy = 0;
+            gameEntityWorld(e, wx, wy);
+            const ImVec2 sp = _cam.worldToScreen(wx, wy);
+            _selScreenX = origin.x + sp.x;
+            _selScreenY = origin.y + sp.y;
+            _selOnScreen = true;
+            break;
+        }
+    }
+
+    // Клик по карте — выбрать объект под курсором; наведение — подсказка PID/FID/арт.
+    if (_centerOnSelected) {
+        for (const auto& e : _loc.entities) {
+            if (e.localId != _state.selectedEntity) continue;
+            float wx = 0, wy = 0;
+            gameEntityWorld(e, wx, wy);
+            _cam.panX = canvasSize.x * 0.5f - wx * _cam.zoom;
+            _cam.panY = canvasSize.y * 0.5f - wy * _cam.zoom;
+            break;
+        }
+        _centerOnSelected = false;
+    }
+
+    if (hovered) {
+        const ImVec2 m = ImGui::GetIO().MousePos;
+        const int exi = pickExitCell(_gameCache, _cam, m.x, m.y, origin.x, origin.y);
+        if (exi >= 0) {
+            const auto& xc = _gameCache.exits[exi];
+            ImGui::BeginTooltip();
+            if (xc.green) {
+                ImGui::Text("Переход -> карта id %d (двойной клик)", xc.targetMap);
+            } else {
+                ImGui::TextUnformatted("Выход на глобальную карту");
+            }
+            ImGui::EndTooltip();
+            if (xc.green && xc.targetMap > 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                const std::string entry = mapEntryForId(xc.targetMap);
+                if (!entry.empty()) selectMap(entry);
+                else _status = "Карта id " + std::to_string(xc.targetMap) + " не найдена";
+            }
+        } else {
+        const int id = pickGameObject(_gameCache, _cam, m.x, m.y, origin.x, origin.y);
+        if (id > 0) {
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                _state.selectedEntity = id;
+                _invOpenFor = id;  // двойной клик по объекту — окно с иконками
+            }
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                _state.selectedEntity = id;
+                _scrollListToSelected = true;  // прокрутить список к выбранному
+            }
+            for (const auto& e : _loc.entities) {
+                if (e.localId != id) continue;
+                const std::string art = _sprites.artName(e.fidType, e.fidNum);
+                ImGui::BeginTooltip();
+                ImGui::Text("id %d  %s", e.localId, toString(e.kind).c_str());
+                ImGui::Text("PID %u:%u   hex %d,%d  elev %d", e.proto.type, e.proto.num, e.x, e.y,
+                            e.elevation);
+                ImGui::Text("FID %u:%u  (%s)", e.fidType, e.fidNum, art.c_str());
+                ImGui::EndTooltip();
+
+                // Описание внизу (как «бинокль» в игре).
+                const std::string desc = nameOf(e);
+                if (!desc.empty()) {
+                    ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + canvasSize.y - 26));
+                    ImGui::TextColored(ImVec4(0.95f, 0.95f, 0.75f, 1.0f), "%s", desc.c_str());
+                }
+                break;
+            }
+        }
+        }
+    }
 
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + 8));
-    ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1), "zoom %.2f   колесо — зум, ПКМ/СКМ — пан",
-                       _cam.zoom);
-}
+    ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1), "zoom %.2f  %s   колесо — зум, ПКМ/СКМ — пан",
+                       _cam.zoom,
+                       _gameCache.hasScroll ? "вписано по scroll-blocker" : "вписано по содержимому");
 
-void App::drawLegend(const ImVec2& origin, float canvasH) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    struct Row {
-        ImU32 col;
-        const char* name;
-    };
-    const Row rows[] = {
-        {IM_COL32(90, 210, 100, 255), "NPC"},
-        {IM_COL32(240, 210, 70, 255), "предмет"},
-        {IM_COL32(80, 180, 230, 255), "сценарий"},
-        {IM_COL32(190, 190, 190, 255), "стена"},
-        {IM_COL32(220, 110, 210, 255), "прочее"},
-        {IM_COL32(255, 130, 0, 255), "переход"},
-    };
-    const int n = IM_ARRAYSIZE(rows);
-    const float x = origin.x + 10.0f;
-    const float boxH = n * 18.0f + 12.0f;
-    const float y = origin.y + canvasH - boxH - 10.0f;
-    dl->AddRectFilled(ImVec2(x - 6, y - 6), ImVec2(x + 150, y + boxH - 6), IM_COL32(0, 0, 0, 170), 4.0f);
-    for (int i = 0; i < n; ++i) {
-        const float ry = y + i * 18.0f;
-        dl->AddRectFilled(ImVec2(x, ry), ImVec2(x + 12, ry + 12), rows[i].col);
-        dl->AddText(ImVec2(x + 18, ry - 2), IM_COL32(230, 230, 230, 255), rows[i].name);
-    }
+    drawInventoryPopup();
 }
 
 void App::drawMapBrowser() {

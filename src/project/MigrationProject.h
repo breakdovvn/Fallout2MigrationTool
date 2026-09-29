@@ -13,8 +13,11 @@ struct ProjectState {
     float panY = 0.0f;
     int selectedEntity = -1;
     int elevation = 0;
-    bool showTiles = true;
-    bool showEntities = true;
+    bool showRoofs = false;    // крыши/перекрытия (в игре скрыты по умолчанию)
+    bool langRu = true;        // язык текстов: false = EN, true = RU (по умолчанию RU)
+    bool showExits = true;     // сетки выходов
+    bool showContents = false; // содержимое контейнеров на карте
+    int kindMask = 0x3F;       // битовая маска видимости типов (0 Item .. 5 Misc)
 };
 
 // Проект миграции одной локации: projects/<Id>.migration/

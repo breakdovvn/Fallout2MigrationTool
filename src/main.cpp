@@ -23,6 +23,10 @@ int main(int argc, char** argv) {
             cfg.locationId = argv[++i];
         } else if (a == "--switch-test" && i + 1 < argc) {
             cfg.testSwitchMap = argv[++i];
+        } else if (a == "--ru-text" && i + 1 < argc) {
+            cfg.russianTextDir = argv[++i];
+        } else if (a == "--ru-dat" && i + 1 < argc) {
+            cfg.russianDat = argv[++i];
         }
     }
     f2mt::App app;

@@ -52,11 +52,13 @@ target_link_libraries(imgui PUBLIC SDL2::SDL2)
 # --- Core library -------------------------------------------------------
 add_library(f2mt_core STATIC
     src/core/Model.cpp
+    src/core/FomapReader.cpp
     src/source/ByteReader.cpp
     src/source/ProtoReader.cpp
     src/source/MapReader.cpp
     src/source/DatProvisioner.cpp
     src/source/LstReader.cpp
+    src/source/MsgReader.cpp
     src/project/MigrationProject.cpp)
 target_include_directories(f2mt_core PUBLIC src)
 target_link_libraries(f2mt_core PUBLIC nlohmann_json::nlohmann_json)
@@ -65,7 +67,8 @@ target_link_libraries(f2mt_core PUBLIC nlohmann_json::nlohmann_json)
 add_executable(f2mt_viewer WIN32
     src/main.cpp
     src/ui/App.cpp
-    src/ui/MapRender.cpp)
+    src/ui/MapRender.cpp
+    src/render/Graphics.cpp)
 target_link_libraries(f2mt_viewer PRIVATE f2mt_core imgui SDL2::SDL2main SDL2::SDL2)
 
 # Копируем SDL2.dll рядом с исполняемым файлом.

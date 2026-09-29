@@ -9,7 +9,9 @@ bool LstReader::load(const std::string& path) {
     if (!in) return false;
     std::string line;
     while (std::getline(in, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Имя — первое слово строки (в LST возможны хвостовые пробелы/комментарии).
+        const size_t sp = line.find_first_of(" \t\r");
+        if (sp != std::string::npos) line.erase(sp);
         _lines.push_back(std::move(line));
     }
     return true;
