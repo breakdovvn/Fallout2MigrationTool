@@ -50,8 +50,15 @@ int objTypePriority(ProtoType k) {
 
 // FRM закреплён низ-центром: left = ax - w/2, top = ay - h (object.cc:4916-4917).
 void drawSpriteItem(ImDrawList* dl, const ImVec2& origin, const ImVec2& clipMin, const ImVec2& clipMax,
-                    const GameSpriteItem& it, const Camera& cam) {
-    if (it.tex == nullptr || it.w <= 0 || it.h <= 0) return;
+                    const GameSpriteItem& it, const Camera& cam, SpriteManager* sprites) {
+    SDL_Texture* tex = static_cast<SDL_Texture*>(it.tex);
+    if (it.animated && sprites != nullptr && !it.path.empty()) {
+        const double t = ImGui::GetTime();
+        int frame = static_cast<int>(t * it.fps) % it.framesPerDir;
+        if (frame < 0) frame = 0;
+        if (SDL_Texture* an = sprites->texture(it.path, frame, it.dir)) tex = an;
+    }
+    if (tex == nullptr || it.w <= 0 || it.h <= 0) return;
     const ImVec2 a = cam.worldToScreen(it.wx, it.wy);
     const float w = it.w * cam.zoom;
     const float h = it.h * cam.zoom;
@@ -63,12 +70,13 @@ void drawSpriteItem(ImDrawList* dl, const ImVec2& origin, const ImVec2& clipMin,
     }
     const ImVec2 pmax(pmin.x + w, pmin.y + h);
     if (pmax.x < clipMin.x || pmax.y < clipMin.y || pmin.x > clipMax.x || pmin.y > clipMax.y) return;
-    dl->AddImage((ImTextureID)(intptr_t)it.tex, pmin, pmax);
+    dl->AddImage((ImTextureID)(intptr_t)tex, pmin, pmax);
 }
 
 void drawGameCached(ImDrawList* dl, const ImVec2& origin, const ImVec2& clipMin, const ImVec2& clipMax,
-                    const GameRenderCache& cache, const Camera& cam, bool showRoofs, bool showExits) {
-    for (const auto& it : cache.floors) drawSpriteItem(dl, origin, clipMin, clipMax, it, cam);
+                    const GameRenderCache& cache, const Camera& cam, bool showRoofs, bool showExits,
+                    SpriteManager* sprites) {
+    for (const auto& it : cache.floors) drawSpriteItem(dl, origin, clipMin, clipMax, it, cam, sprites);
 
     // Сетки выходов (поверх пола, под объектами).
     for (const auto& xc : cache.exits) {
@@ -87,15 +95,25 @@ void drawGameCached(ImDrawList* dl, const ImVec2& origin, const ImVec2& clipMin,
         dl->AddPolyline(pts, 4, line, ImDrawFlags_Closed, 1.5f);
     }
 
-    for (const auto& it : cache.objects) drawSpriteItem(dl, origin, clipMin, clipMax, it, cam);
+    for (const auto& it : cache.objects) drawSpriteItem(dl, origin, clipMin, clipMax, it, cam, sprites);
     if (showRoofs) {
-        for (const auto& it : cache.roofs) drawSpriteItem(dl, origin, clipMin, clipMax, it, cam);
+        for (const auto& it : cache.roofs) drawSpriteItem(dl, origin, clipMin, clipMax, it, cam, sprites);
     }
 }
 }  // namespace
 
-void buildGameCache(const Location& loc, int elevation, int kindMask, bool showContents,
-                    SpriteManager* sprites, GameRenderCache& cache) {
+void buildGameCache(const Location& loc, const ProjectState& st, SpriteManager* sprites,
+                    GameRenderCache& cache) {
+    const int elevation = st.elevation;
+    const int kindMask = st.kindMask;
+    const bool showContents = st.showContents;
+    auto animOn = [&](int localId) {
+        if (st.animationsOn) return true;
+        for (int id : st.animIds) {
+            if (id == localId) return true;
+        }
+        return false;
+    };
     cache.floors.clear();
     cache.objects.clear();
     cache.roofs.clear();
@@ -193,7 +211,13 @@ void buildGameCache(const Location& loc, int elevation, int kindMask, bool showC
         gameObjProjection(e.x, e.y, sx, sy);
         const float ax = float(sx) + 16.0f + float(s.fx);
         const float ay = float(sy) + 8.0f + float(s.fy);
-        tmp.push_back({&e, float(sy), {ax, ay, s.w, s.h, s.tex, true, e.localId}});
+        GameSpriteItem gi{ax, ay, s.w, s.h, s.tex, true, e.localId};
+        gi.path = s.path;
+        gi.framesPerDir = s.framesPerDir;
+        gi.fps = s.fps;
+        gi.dir = dir;
+        gi.animated = (s.framesPerDir > 1 && s.fps > 0) && animOn(e.localId);
+        tmp.push_back({&e, float(sy), gi});
         acc(ax - s.w * 0.5f, ay - s.h, float(s.w), float(s.h));
     }
     std::sort(tmp.begin(), tmp.end(), [](const SortKey& a, const SortKey& b) {
@@ -218,7 +242,12 @@ void buildGameCache(const Location& loc, int elevation, int kindMask, bool showC
                 if (s.tex != nullptr) {
                     const float dx = float(idx % 4) * 3.0f;
                     const float dy = -float(idx / 4) * 3.0f;
-                    cache.objects.push_back({pax + dx, pay + dy, s.w, s.h, s.tex, true, -1});
+                    GameSpriteItem gi{pax + dx, pay + dy, s.w, s.h, s.tex, true, -1};
+                    gi.path = s.path;
+                    gi.framesPerDir = s.framesPerDir;
+                    gi.fps = s.fps;
+                    gi.dir = 0;
+                    cache.objects.push_back(gi);
                 }
                 ++idx;
             }
@@ -229,28 +258,7 @@ void buildGameCache(const Location& loc, int elevation, int kindMask, bool showC
 }
 
 bool gameFitBounds(const GameRenderCache& cache, float& minx, float& miny, float& maxx, float& maxy) {
-    if (cache.hasScroll) {
-        auto pr = [](int hx, int hy, float& x, float& y) {
-            int sx, sy;
-            gameObjProjection(hx, hy, sx, sy);
-            x = float(sx) + 16.0f;
-            y = float(sy) + 8.0f;
-        };
-        float x0, y0, x1, y1, x2, y2, x3, y3;
-        pr(cache.scrollMinX, cache.scrollMinY, x0, y0);
-        pr(cache.scrollMaxX, cache.scrollMinY, x1, y1);
-        pr(cache.scrollMinX, cache.scrollMaxY, x2, y2);
-        pr(cache.scrollMaxX, cache.scrollMaxY, x3, y3);
-        minx = std::min(std::min(x0, x1), std::min(x2, x3));
-        maxx = std::max(std::max(x0, x1), std::max(x2, x3));
-        miny = std::min(std::min(y0, y1), std::min(y2, y3));
-        maxy = std::max(std::max(y0, y1), std::max(y2, y3));
-        minx -= 120.0f;
-        maxx += 120.0f;
-        miny -= 160.0f;
-        maxy += 48.0f;
-        return true;
-    }
+    // Вписываем по содержимому карты (scroll-blocker'ы больше не влияют на камеру).
     if (!cache.valid) return false;
     minx = cache.minx;
     miny = cache.miny;
@@ -312,7 +320,7 @@ void drawMap(ImDrawList* dl, const ImVec2& origin, float canvasW, float canvasH,
 
     if (!cache.valid || cache.loc != &loc || cache.elevation != st.elevation ||
         cache.kindMask != st.kindMask || cache.showContents != st.showContents) {
-        buildGameCache(loc, st.elevation, st.kindMask, st.showContents, sprites, cache);
+        buildGameCache(loc, st, sprites, cache);
     }
 
     float minx = 0, miny = 0, maxx = 100, maxy = 100;
@@ -323,7 +331,7 @@ void drawMap(ImDrawList* dl, const ImVec2& origin, float canvasW, float canvasH,
                       ImVec2(origin.x + mapB.x, origin.y + mapB.y), IM_COL32(18, 18, 22, 255));
 
     if (cache.valid) {
-        drawGameCached(dl, origin, clipMin, clipMax, cache, cam, st.showRoofs, st.showExits);
+        drawGameCached(dl, origin, clipMin, clipMax, cache, cam, st.showRoofs, st.showExits, sprites);
     }
 
     dl->PopClipRect();

@@ -230,7 +230,12 @@ bool MigrationProject::saveState(const ProjectState& st) const {
            {"selected", st.selectedEntity},
            {"elevation", st.elevation},
            {"showRoofs", st.showRoofs},
+           {"night", st.night},
+           {"dayBrightness", st.dayBrightness},
+           {"nightBrightness", st.nightBrightness},
            {"langRu", st.langRu},
+           {"animationsOn", st.animationsOn},
+           {"animIds", st.animIds},
            {"showExits", st.showExits},
            {"showContents", st.showContents},
            {"kindMask", st.kindMask}};
@@ -255,7 +260,12 @@ bool MigrationProject::loadState(ProjectState& st) const {
     st.selectedEntity = j.value("selected", -1);
     st.elevation = j.value("elevation", 0);
     st.showRoofs = j.value("showRoofs", false);
+    st.night = j.value("night", false);
+    st.dayBrightness = j.value("dayBrightness", 5.0f);
+    st.nightBrightness = j.value("nightBrightness", 1.3f);
     st.langRu = j.value("langRu", true);
+    st.animationsOn = j.value("animationsOn", false);
+    st.animIds = j.value("animIds", std::vector<int>{});
     st.showExits = j.value("showExits", true);
     st.showContents = j.value("showContents", false);
     st.kindMask = j.value("kindMask", 0x3F);

@@ -64,6 +64,7 @@ private:
     void drawIssues();
     void drawMapCanvas();
     void drawInventoryPopup();
+    void drawWorldWindow();
 
     AppConfig _cfg;
     MigrationProject _project;
@@ -85,7 +86,9 @@ private:
     std::string _targetDir;                   // папка с целевыми .fomap (fonline-tla/Maps)
     std::vector<std::string> _targetFiles;    // найденные .fomap
     TargetMap _target;                        // прочитанная целевая карта
-    bool _fitPending = true;
+    bool _fitPending = false;   // «Вписать»: показать всю карту
+    bool _openView = true;      // при открытии карты: приближённый вид по центру
+    bool _worldOpen = false;    // окно «Локации/регионы»
     bool _centerOnSelected = false;      // перенести камеру к выбранному
     bool _scrollListToSelected = false;  // прокрутить список к выбранному
     int _kindFilter = -1;  // -1 = все

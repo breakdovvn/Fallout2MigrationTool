@@ -16,9 +16,15 @@ struct GameSpriteItem {
     float wy = 0;   // мировая Y
     int w = 0;
     int h = 0;
-    void* tex = nullptr;      // SDL_Texture*
+    void* tex = nullptr;      // SDL_Texture* (кадр по умолчанию)
     bool bottomAnchor = true; // true: низ-центр в (wx,wy); false: левый-верх
     int localId = -1;         // id сущности (для выбора кликом)
+    // Анимация (многофреймовые FRM): выбор кадра по времени.
+    std::string path;
+    int framesPerDir = 1;
+    int fps = 0;
+    int dir = 0;
+    bool animated = false;    // проигрывать кадры (иначе кадр 0)
 };
 
 struct GameRenderCache {
@@ -55,9 +61,9 @@ struct Camera {
     void screenToWorld(float sx, float sy, float& wx, float& wy) const;
 };
 
-// Пересобрать кэш спрайтов (при смене карты/elevation/маски).
-void buildGameCache(const Location& loc, int elevation, int kindMask, bool showContents,
-                    SpriteManager* sprites, GameRenderCache& cache);
+// Пересобрать кэш спрайтов (при смене карты/elevation/маски/анимаций).
+void buildGameCache(const Location& loc, const ProjectState& st, SpriteManager* sprites,
+                    GameRenderCache& cache);
 
 // Границы для «Вписать»: игровая площадь по scroll-blocker'ам, иначе — габарит спрайтов.
 bool gameFitBounds(const GameRenderCache& cache, float& minx, float& miny, float& maxx, float& maxy);

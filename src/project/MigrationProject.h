@@ -14,7 +14,12 @@ struct ProjectState {
     int selectedEntity = -1;
     int elevation = 0;
     bool showRoofs = false;    // крыши/перекрытия (в игре скрыты по умолчанию)
+    bool night = false;        // освещение: false = день (по умолчанию), true = ночь
+    float dayBrightness = 5.0f;
+    float nightBrightness = 1.3f;
     bool langRu = true;        // язык текстов: false = EN, true = RU (по умолчанию RU)
+    bool animationsOn = false;         // проигрывать все анимации
+    std::vector<int> animIds;          // объекты с персонально включённой анимацией
     bool showExits = true;     // сетки выходов
     bool showContents = false; // содержимое контейнеров на карте
     int kindMask = 0x3F;       // битовая маска видимости типов (0 Item .. 5 Misc)

@@ -71,6 +71,7 @@ int App::run(const AppConfig& cfg) {
     _cam.zoom = _state.zoom;
     _cam.panX = _state.panX;
     _cam.panY = _state.panY;
+    _sprites.setBrightness(_state.night ? _state.nightBrightness : _state.dayBrightness);  // день ярче (по умолчанию)
 
     while (_running) {
         SDL_Event event;
@@ -260,7 +261,7 @@ bool App::parseSource() {
     }
     _loc.id = _cfg.locationId;
     if (_loc.displayName.empty()) _loc.displayName = _cfg.locationId;
-    _fitPending = true;
+    _openView = true;          // при открытии — приближённый вид
     _gameCache.valid = false;  // пересобрать список спрайтов
     return true;
 }
@@ -427,6 +428,51 @@ std::string App::nameOf(const Entity& e) const { return nameProto(e.proto.type, 
 
 std::string App::describe(const Entity& e) const { return descProto(e.proto.type, e.textId); }
 
+void App::drawWorldWindow() {
+    if (!_worldOpen) return;
+    ImGui::SetNextWindowSize(ImVec2(520, 480), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Локации / регионы", &_worldOpen)) {
+        ImGui::End();
+        return;
+    }
+    static char filter[64] = "";
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##wf", "фильтр...", filter, sizeof(filter));
+    const std::string fl = lower(filter);
+
+    std::map<std::string, std::vector<std::string>> groups;
+    for (const auto& m : _availableMaps) {
+        if (!fl.empty() && lower(m).find(fl) == std::string::npos) continue;
+        std::string stem = std::filesystem::path(m).stem().string();
+        std::string p;
+        for (char c : stem) {
+            if (std::isalpha(static_cast<unsigned char>(c))) {
+                p.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+            } else {
+                break;
+            }
+        }
+        if (p.empty()) p = stem.substr(0, std::min<size_t>(3, stem.size()));
+        groups[p].push_back(m);
+    }
+
+    ImGui::BeginChild("wlist", ImVec2(0, 0), true);
+    for (auto& kv : groups) {
+        if (ImGui::TreeNodeEx(kv.first.c_str(), ImGuiTreeNodeFlags_DefaultOpen, "%s  (%zu)",
+                              kv.first.c_str(), kv.second.size())) {
+            for (const auto& m : kv.second) {
+                if (ImGui::Selectable(m.c_str())) {
+                    selectMap(m);
+                    _worldOpen = false;
+                }
+            }
+            ImGui::TreePop();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 void App::drawInventoryPopup() {
     if (!_selOnScreen || _state.selectedEntity <= 0 || _invOpenFor != _state.selectedEntity) return;
     const Entity* e = nullptr;
@@ -546,6 +592,8 @@ void App::drawUi() {
     ImGui::EndChild();
 
     ImGui::End();
+
+    drawWorldWindow();
 }
 
 void App::drawToolbar() {
@@ -559,6 +607,27 @@ void App::drawToolbar() {
     ImGui::Checkbox("Крыши", &_state.showRoofs);
     ImGui::SameLine();
     ImGui::Checkbox("Сетки", &_state.showExits);
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Анимации", &_state.animationsOn)) {
+        _gameCache.valid = false;  // пересобрать спрайты
+    }
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Ночь", &_state.night)) {
+        _sprites.setBrightness(_state.night ? _state.nightBrightness : _state.dayBrightness);
+        _gameCache.valid = false;  // пересобрать спрайты с новой яркостью
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(88);
+    if (ImGui::DragFloat("##dayB", &_state.dayBrightness, 0.05f, 0.2f, 8.0f, "день %.2f")) {
+        _sprites.setBrightness(_state.night ? _state.nightBrightness : _state.dayBrightness);
+        _gameCache.valid = false;
+    }
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(88);
+    if (ImGui::DragFloat("##nightB", &_state.nightBrightness, 0.05f, 0.2f, 8.0f, "ночь %.2f")) {
+        _sprites.setBrightness(_state.night ? _state.nightBrightness : _state.dayBrightness);
+        _gameCache.valid = false;
+    }
     ImGui::SameLine();
     ImGui::TextUnformatted("Язык:");
     ImGui::SameLine();
@@ -574,6 +643,10 @@ void App::drawToolbar() {
             else _state.kindMask &= ~(1 << k);
         }
         if (k < 5) ImGui::SameLine();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Локации")) {
+        _worldOpen = true;
     }
     ImGui::SameLine();
     if (ImGui::Button("Вписать")) {
@@ -696,6 +769,27 @@ void App::drawInspector() {
     ImGui::Text("localId: %d", e->localId);
     ImGui::Text("kind: %s", kindName(e->kind));
     ImGui::Text("PID: %s  (raw 0x%08X)", pidString(e->proto).c_str(), e->proto.raw());
+    {
+        const int fpd = _sprites.framesPerDir(e->fidType, e->fidNum);
+        if (fpd > 1) {
+            bool on = false;
+            for (int id : _state.animIds) {
+                if (id == e->localId) { on = true; break; }
+            }
+            char lbl[64];
+            std::snprintf(lbl, sizeof(lbl), "Анимация (%d кадров)", fpd);
+            if (ImGui::Checkbox(lbl, &on)) {
+                if (on) {
+                    _state.animIds.push_back(e->localId);
+                } else {
+                    _state.animIds.erase(
+                        std::remove(_state.animIds.begin(), _state.animIds.end(), e->localId),
+                        _state.animIds.end());
+                }
+                _gameCache.valid = false;
+            }
+        }
+    }
     ImGui::Text("hex: %d, %d   elevation: %d", e->x, e->y, e->elevation);
     ImGui::Text("objectPos: %d", e->objectPos);
     ImGui::Text("dir: %d (%s)  frame: %d", e->dir, dirName(e->dir), e->frame);
@@ -776,21 +870,29 @@ void App::drawMapCanvas() {
     const ImVec2 canvasSize = ImGui::GetContentRegionAvail();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
 
-    if (_fitPending && canvasSize.x > 80.0f && canvasSize.y > 80.0f) {
-        buildGameCache(_loc, _state.elevation, _state.kindMask, _state.showContents, &_sprites,
-                       _gameCache);
+    if ((_fitPending || _openView) && canvasSize.x > 80.0f && canvasSize.y > 80.0f) {
+        buildGameCache(_loc, _state, &_sprites, _gameCache);
         float bx0 = 0, by0 = 0, bx1 = 0, by1 = 0;
         if (gameFitBounds(_gameCache, bx0, by0, bx1, by1)) {
-            const float w = bx1 - bx0;
-            const float h = by1 - by0;
-            if (w > 1.0f && h > 1.0f) {
-                _cam.zoom = std::clamp(std::min((canvasSize.x - 40.0f) / w, (canvasSize.y - 40.0f) / h),
-                                       0.02f, 4.0f);
-                _cam.panX = (canvasSize.x - (bx0 + bx1) * _cam.zoom) * 0.5f;
-                _cam.panY = (canvasSize.y - (by0 + by1) * _cam.zoom) * 0.5f;
+            if (_fitPending) {
+                // «Вписать»: вся карта целиком.
+                const float w = bx1 - bx0;
+                const float h = by1 - by0;
+                if (w > 1.0f && h > 1.0f) {
+                    const float z = std::min((canvasSize.x - 32.0f) / w, (canvasSize.y - 32.0f) / h);
+                    _cam.zoom = std::clamp(z, 0.02f, 4.0f);
+                }
+            } else {
+                // При открытии: приближённый вид (видно лишь часть карты).
+                _cam.zoom = 1.0f;
             }
+            const float cx = (bx0 + bx1) * 0.5f;
+            const float cy = (by0 + by1) * 0.5f;
+            _cam.panX = canvasSize.x * 0.5f - cx * _cam.zoom;
+            _cam.panY = canvasSize.y * 0.5f - cy * _cam.zoom;
         }
         _fitPending = false;
+        _openView = false;
     }
 
     ImGui::InvisibleButton("canvas", ImVec2(std::max(canvasSize.x, 1.0f), std::max(canvasSize.y, 1.0f)),
@@ -864,6 +966,9 @@ void App::drawMapCanvas() {
                 if (!entry.empty()) selectMap(entry);
                 else _status = "Карта id " + std::to_string(xc.targetMap) + " не найдена";
             }
+            if (!xc.green && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                _worldOpen = true;  // красная сетка — открыть окно локаций
+            }
         } else {
         const int id = pickGameObject(_gameCache, _cam, m.x, m.y, origin.x, origin.y);
         if (id > 0) {
@@ -898,9 +1003,8 @@ void App::drawMapCanvas() {
     }
 
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + 8));
-    ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1), "zoom %.2f  %s   колесо — зум, ПКМ/СКМ — пан",
-                       _cam.zoom,
-                       _gameCache.hasScroll ? "вписано по scroll-blocker" : "вписано по содержимому");
+    ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1),
+                       "zoom %.2f   колесо — зум, ПКМ/СКМ — пан", _cam.zoom);
 
     drawInventoryPopup();
 }

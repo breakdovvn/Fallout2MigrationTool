@@ -36,10 +36,16 @@ bool Palette::load(const std::string& path) {
 
 uint32_t Palette::rgba(uint8_t index) const {
     if (index == 0) return 0u;  // индекс 0 — прозрачный
-    const uint8_t r = _rgb[index * 3];
-    const uint8_t g = _rgb[index * 3 + 1];
-    const uint8_t b = _rgb[index * 3 + 2];
-    return (0xFFu << 24) | (uint32_t(r) << 16) | (uint32_t(g) << 8) | b;
+    auto scale = [this](uint8_t v) -> uint32_t {
+        float f = static_cast<float>(v) * _brightness;
+        if (f < 0.0f) f = 0.0f;
+        if (f > 255.0f) f = 255.0f;
+        return static_cast<uint32_t>(f);
+    };
+    const uint32_t r = scale(_rgb[index * 3]);
+    const uint32_t g = scale(_rgb[index * 3 + 1]);
+    const uint32_t b = scale(_rgb[index * 3 + 2]);
+    return (0xFFu << 24) | (r << 16) | (g << 8) | b;
 }
 
 bool FrmImage::load(const std::string& path, const Palette& pal) {
@@ -47,7 +53,7 @@ bool FrmImage::load(const std::string& path, const Palette& pal) {
     if (!r.load(path)) return false;
 
     r.u32();                       // version
-    r.u16();                       // fps
+    _fps = r.u16();
     r.u16();                       // actionFrame
     _framesPerDir = r.u16();
     for (int i = 0; i < 6; ++i) _xOff[i] = r.i16();
@@ -151,6 +157,23 @@ void SpriteManager::init(SDL_Renderer* renderer, std::string rawDir, std::string
         if (!_artLists[t].empty()) any = true;
     }
     _artReady = any;
+}
+
+int SpriteManager::framesPerDir(uint8_t type, uint16_t num) {
+    const std::string path = resolveArtLocal(type, num);
+    if (path.empty()) return 0;
+    const FrmImage* img = loadFrm(path);
+    return img != nullptr ? img->framesPerDir() : 0;
+}
+
+void SpriteManager::setBrightness(float b) {
+    if (_pal.brightness() == b) return;
+    _pal.setBrightness(b);
+    for (auto& kv : _texCache) {
+        if (kv.second != nullptr) SDL_DestroyTexture(kv.second);
+    }
+    _texCache.clear();
+    _frmCache.clear();  // RGBA пересоберётся с новой яркостью
 }
 
 int SpriteManager::artListCount(uint8_t type) const {
@@ -316,6 +339,9 @@ SpriteManager::SpriteRef SpriteManager::sprite(uint8_t type, uint16_t num, int f
     ref.h = fr->h;
     ref.fx = img->xOffset(dir);
     ref.fy = img->yOffset(dir);
+    ref.path = path;
+    ref.framesPerDir = img->framesPerDir();
+    ref.fps = img->fps();
     return ref;
 }
 
