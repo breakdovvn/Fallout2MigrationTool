@@ -159,6 +159,7 @@ int SpriteManager::artListCount(uint8_t type) const {
 }
 
 std::string SpriteManager::artName(uint8_t type, uint16_t num) const {
+    if (type == 1) num &= 0x0FFF;  // у криттеров индекс арта — младшие 12 бит
     return artFrmName(type, num);
 }
 
@@ -244,6 +245,8 @@ bool SpriteManager::extractEntry(const std::string& datPath, const std::string& 
 
 std::string SpriteManager::resolveArtLocal(uint8_t type, uint16_t num) {
     if (type >= 8) return {};
+    // У криттеров младшие 12 бит FID — индекс арта, старшие — флаги/анимация.
+    if (type == 1) num &= 0x0FFF;
     const uint32_t key = (static_cast<uint32_t>(type) << 16) | num;
     const auto cached = _pathCache.find(key);
     if (cached != _pathCache.end()) return cached->second;  // кэш только успешных путей

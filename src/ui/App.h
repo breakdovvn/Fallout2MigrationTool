@@ -20,8 +20,8 @@ struct AppConfig {
     std::string gameDat = "E:\\Games\\Fallout 2\\master.dat";
     std::string critterDat = "E:\\Games\\Fallout 2\\critter.dat";
     std::string targetMapsDir = "E:\\Games\\fonline-tla\\Maps";
-    std::string russianTextDir =
-        "E:\\Games\\Fallout 2 RUS\\DATA\\TEXT\\ENGLISH\\GAME";  // русские pro_*.msg
+    // Русские тексты Fallout 2 (проверено: id совпадают с F2-прототипами).
+    std::string russianTextDir = "E:\\Games\\Fallout 2 RUS\\data\\text\\english\\game";
     std::string russianDat;      // русский master.dat (для извлечения pro_*.msg)
     std::string projectDir = "projects\\ArroyoTemple.migration";
     std::string mapEntry = "maps\\artemple.map";   // путь внутри .dat
