@@ -186,6 +186,31 @@ std::string SpriteManager::artName(uint8_t type, uint16_t num) const {
     return artFrmName(type, num);
 }
 
+void SpriteManager::ensureArts(const std::vector<std::string>& artPaths) {
+    std::vector<std::string> masterEntries;
+    std::vector<std::string> critterEntries;
+    for (const auto& p : artPaths) {
+        if (p.empty()) continue;
+        if (!localArtPath(p).empty()) continue;  // уже есть локально или в арт-корнях
+        std::string entry = p;
+        for (char& c : entry) { if (c == '/') c = '\\'; }
+        std::string el;
+        for (char c : entry) el.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        if (el.rfind("art\\critters\\", 0) == 0 && !_critterDat.empty()) critterEntries.push_back(entry);
+        else masterEntries.push_back(entry);
+    }
+    auto doExtract = [&](const std::string& dat, std::vector<std::string>& v) {
+        if (v.empty() || dat.empty()) return;
+        std::sort(v.begin(), v.end());
+        v.erase(std::unique(v.begin(), v.end()), v.end());
+        DatProvisioner prov(_dat2Exe, dat, _rawDir);
+        prov.extract(v);
+    };
+    doExtract(_masterDat, masterEntries);
+    doExtract(_critterDat, critterEntries);
+    _pathCache.clear();
+}
+
 void SpriteManager::ensureMapArts(const Location& loc) {
     std::vector<std::string> masterEntries;
     std::vector<std::string> critterEntries;
@@ -264,6 +289,17 @@ bool SpriteManager::extractEntry(const std::string& datPath, const std::string& 
     if (prov.extract({entry}) < 0) return false;
     outLocal = mesPath(_rawDir, entry);
     return std::filesystem::exists(outLocal);
+}
+
+std::string SpriteManager::localArtPath(const std::string& artPath) const {
+    if (artPath.empty()) return {};
+    const std::string inRaw = mesPath(_rawDir, artPath);
+    if (std::filesystem::exists(inRaw)) return inRaw;
+    for (const auto& root : _artRoots) {
+        const std::string cand = mesPath(root, artPath);
+        if (std::filesystem::exists(cand)) return cand;
+    }
+    return {};
 }
 
 std::string SpriteManager::resolveArtLocal(uint8_t type, uint16_t num) {
@@ -347,6 +383,70 @@ SpriteManager::SpriteRef SpriteManager::sprite(uint8_t type, uint16_t num, int f
 
 SpriteManager::SpriteRef SpriteManager::tileSprite(uint16_t tileId, int frameIndex) {
     return sprite(4, tileId, frameIndex, 0);
+}
+
+SpriteManager::SpriteRef SpriteManager::spriteByPath(const std::string& artPath, int dir) {
+    SpriteRef ref;
+    if (artPath.empty()) return ref;
+    std::string local = localArtPath(artPath);
+    if (local.empty()) {
+        std::string entry = artPath;
+        for (char& c : entry) { if (c == '/') c = '\\'; }
+        std::string el;
+        for (char c : entry) el.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        const bool crit = el.rfind("art\\critters\\", 0) == 0;
+        const std::string first = crit ? _critterDat : _masterDat;
+        const std::string second = crit ? _masterDat : _critterDat;
+        if ((first.empty() || !extractEntry(first, entry, local)) &&
+            (second.empty() || !extractEntry(second, entry, local))) {
+            return ref;
+        }
+    }
+    // FOnline .fofrm — текстовый дескриптор со строкой "frm = <file>".
+    {
+        std::string ext = std::filesystem::path(local).extension().string();
+        for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (ext == ".fofrm") {
+            std::ifstream din(local);
+            std::string line, target;
+            while (std::getline(din, line)) {
+                if (!line.empty() && line.back() == '\r') line.pop_back();
+                const size_t eq = line.find('=');
+                if (eq == std::string::npos) continue;
+                std::string k = line.substr(0, eq);
+                std::string v = line.substr(eq + 1);
+                const size_t a = k.find_first_not_of(" \t");
+                const size_t b2 = k.find_last_not_of(" \t");
+                if (a == std::string::npos || b2 == std::string::npos) continue;
+                k = k.substr(a, b2 - a + 1);
+                const size_t va = v.find_first_not_of(" \t");
+                if (va == std::string::npos) continue;
+                const size_t vb = v.find_last_not_of(" \t\r");
+                v = v.substr(va, vb - va + 1);
+                if (k == "frm") { target = v; break; }
+            }
+            if (target.empty()) return ref;
+            std::string te = std::filesystem::path(target).extension().string();
+            for (char& c : te) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (te != ".frm") return ref;  // .png пока не декодируем
+            local = (std::filesystem::path(local).parent_path() / target).string();
+            if (!std::filesystem::exists(local)) return ref;
+        }
+    }
+    const FrmImage* img = loadFrm(local);
+    if (img == nullptr) return ref;
+    if (dir < 0 || dir >= 6) dir = 0;
+    const DecodedFrame* fr = img->frame(0, dir);
+    if (fr == nullptr) return ref;
+    ref.tex = texture(local, 0, dir);
+    ref.w = fr->w;
+    ref.h = fr->h;
+    ref.fx = img->xOffset(dir);
+    ref.fy = img->yOffset(dir);
+    ref.path = local;
+    ref.framesPerDir = img->framesPerDir();
+    ref.fps = img->fps();
+    return ref;
 }
 
 SDL_Texture* SpriteManager::texture(const std::string& frmPath, int frameIndex, int dir) {

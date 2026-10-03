@@ -53,6 +53,7 @@ target_link_libraries(imgui PUBLIC SDL2::SDL2)
 add_library(f2mt_core STATIC
     src/core/Model.cpp
     src/core/FomapReader.cpp
+    src/core/WorldMap.cpp
     src/source/ByteReader.cpp
     src/source/ProtoReader.cpp
     src/source/MapReader.cpp

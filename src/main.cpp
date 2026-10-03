@@ -7,6 +7,7 @@
 int main(int argc, char** argv) {
     f2mt::AppConfig cfg;
     bool headless = false;
+    bool dumpSource = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--headless") {
@@ -27,8 +28,16 @@ int main(int argc, char** argv) {
             cfg.russianTextDir = argv[++i];
         } else if (a == "--ru-dat" && i + 1 < argc) {
             cfg.russianDat = argv[++i];
+        } else if (a == "--target" && i + 1 < argc) {
+            cfg.targetFile = argv[++i];
+        } else if (a == "--dump-target") {
+            headless = true;
+        } else if (a == "--dump-source") {
+            headless = true;
+            dumpSource = true;
         }
     }
     f2mt::App app;
+    if ((!cfg.targetFile.empty() || dumpSource) && headless) return app.runTargetDump(cfg);
     return headless ? app.runHeadless(cfg) : app.run(cfg);
 }

@@ -57,6 +57,7 @@ json entityToJson(const Entity& e) {
         {"lightIntensity", e.lightIntensity},
         {"isExit", e.isExit},
         {"exitKind", e.exitKind},
+        {"exitDestElev", e.exitDestElev},
         {"exitDestHex", e.exitDestHex},
         {"exitDestMap", e.exitDestMap},
         {"targetProto", e.targetProto},
@@ -85,6 +86,7 @@ Entity entityFromJson(const json& j) {
     e.lightIntensity = j.value("lightIntensity", 0);
     e.isExit = j.value("isExit", false);
     e.exitKind = j.value("exitKind", 0);
+    e.exitDestElev = j.value("exitDestElev", 0);
     e.exitDestHex = j.value("exitDestHex", 0u);
     e.exitDestMap = j.value("exitDestMap", 0u);
     e.targetProto = j.value("targetProto", std::string{});
@@ -234,6 +236,8 @@ bool MigrationProject::saveState(const ProjectState& st) const {
            {"dayBrightness", st.dayBrightness},
            {"nightBrightness", st.nightBrightness},
            {"langRu", st.langRu},
+           {"gameDir", st.gameDir},
+           {"fonlineDir", st.fonlineDir},
            {"animationsOn", st.animationsOn},
            {"animIds", st.animIds},
            {"showExits", st.showExits},
@@ -264,6 +268,8 @@ bool MigrationProject::loadState(ProjectState& st) const {
     st.dayBrightness = j.value("dayBrightness", 5.0f);
     st.nightBrightness = j.value("nightBrightness", 1.3f);
     st.langRu = j.value("langRu", true);
+    st.gameDir = j.value("gameDir", std::string{});
+    st.fonlineDir = j.value("fonlineDir", std::string{});
     st.animationsOn = j.value("animationsOn", false);
     st.animIds = j.value("animIds", std::vector<int>{});
     st.showExits = j.value("showExits", true);

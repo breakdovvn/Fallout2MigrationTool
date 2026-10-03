@@ -18,6 +18,8 @@ struct ProjectState {
     float dayBrightness = 5.0f;
     float nightBrightness = 1.3f;
     bool langRu = true;        // язык текстов: false = EN, true = RU (по умолчанию RU)
+    std::string gameDir;               // папка игры или путь к master.dat
+    std::string fonlineDir;            // папка fonline-tla (целевые ресурсы)
     bool animationsOn = false;         // проигрывать все анимации
     std::vector<int> animIds;          // объекты с персонально включённой анимацией
     bool showExits = true;     // сетки выходов

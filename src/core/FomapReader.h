@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace f2mt {
@@ -12,6 +13,8 @@ struct TargetObject {
     int y = 0;
     int dir = 0;
     bool critter = false;
+    // Гексы мультигексной сетки: клиент рисует спрайт в каждом из них (MapView.cpp:536).
+    std::vector<std::pair<int, int>> multihex;
 };
 
 // Прочитанная целевая карта (MVP-2). Не смешивается с нормализованной моделью источника.

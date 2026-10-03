@@ -25,6 +25,8 @@ struct GameSpriteItem {
     int fps = 0;
     int dir = 0;
     bool animated = false;    // проигрывать кадры (иначе кадр 0)
+    bool marker = false;      // нет арта — рисовать цветной маркер
+    uint32_t markerColor = 0;
 };
 
 struct GameRenderCache {

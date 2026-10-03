@@ -13,21 +13,15 @@ namespace f2mt {
 
 namespace {
 // Проекция «как в игре»: falloute2CE tile.cc::tileToScreenXY (origin 0).
+// Проекция гекса: решётка FOnline GeometryHelper::GetHexPos (MAP_HEX_WIDTH=32,
+// MAP_HEX_LINE_HEIGHT=12). Сдвиг (4784, -1188) подобран так, чтобы при hx<200 результат
+// в точности совпадал с Fallout tileToScreenXY (W=200) — это выравнивает объекты с
+// квадратной сеткой пола в исходных .map. При этом формула корректна и для карт TLA
+// шириной >200 гексов, где Fallout-формула ломается (v3 уходит в минус).
 void gameObjProjection(int hx, int hy, int& sx, int& sy) {
-    const int W = 200;
-    const int v3 = W - 1 - hx;
-    const int v4 = hy;
-    sx = 0;
-    sy = 0;
-    const int v5 = v3 / -2;
-    sx += 48 * (v3 / 2);
-    sy += 12 * v5;
-    if (v3 & 1) {
-        if (v3 <= 0) { sx -= 16; sy += 12; }
-        else { sx += 32; }
-    }
-    sx += 16 * v4;
-    sy += 12 * v4;
+    const int hx2 = (hx < 0 ? hx - 1 : hx) / 2;  // floor(hx/2)
+    sx = 4784 + 16 * hy - 32 * hx + 16 * hx2;
+    sy = -1188 + 12 * hy + 12 * hx2;
 }
 
 // Тайлы: squareTileToScreenXY + оффсеты квадратной сетки (_square_offx=_tile_offx-16, _square_offy=_tile_offy-2).
@@ -36,6 +30,17 @@ void gameTileProjection(int tx, int ty, int& sx, int& sy) {
     const int v6 = ty;
     sx = -16 + 48 * v5 + 32 * v6;
     sy = -2 - 12 * v5 + 24 * v6;
+}
+
+uint32_t kindMarkerColor(ProtoType k) {
+    switch (k) {
+        case ProtoType::Critter: return IM_COL32(90, 210, 100, 255);
+        case ProtoType::Item: return IM_COL32(240, 210, 70, 255);
+        case ProtoType::Scenery: return IM_COL32(80, 180, 230, 255);
+        case ProtoType::Wall: return IM_COL32(200, 200, 200, 255);
+        case ProtoType::Tile: return IM_COL32(150, 110, 70, 255);
+        default: return IM_COL32(220, 110, 210, 255);
+    }
 }
 
 int objTypePriority(ProtoType k) {
@@ -51,6 +56,14 @@ int objTypePriority(ProtoType k) {
 // FRM закреплён низ-центром: left = ax - w/2, top = ay - h (object.cc:4916-4917).
 void drawSpriteItem(ImDrawList* dl, const ImVec2& origin, const ImVec2& clipMin, const ImVec2& clipMax,
                     const GameSpriteItem& it, const Camera& cam, SpriteManager* sprites) {
+    if (it.marker) {
+        const ImVec2 a = cam.worldToScreen(it.wx, it.wy);
+        const ImVec2 p(origin.x + a.x, origin.y + a.y);
+        const float s = std::max(4.0f, it.w * cam.zoom);
+        dl->AddRectFilled(ImVec2(p.x - s * 0.5f, p.y - s * 0.5f),
+                          ImVec2(p.x + s * 0.5f, p.y + s * 0.5f), it.markerColor);
+        return;
+    }
     SDL_Texture* tex = static_cast<SDL_Texture*>(it.tex);
     if (it.animated && sprites != nullptr && !it.path.empty()) {
         const double t = ImGui::GetTime();
@@ -190,7 +203,7 @@ void buildGameCache(const Location& loc, const ProjectState& st, SpriteManager* 
         // FID-арт неиспользуемый.
         if (e.proto.type == 5 && e.proto.num >= 16 && e.proto.num <= 23) {
             int ex, ey;
-            gameObjProjection(e.x, e.y, ex, ey);
+            gameObjProjection(e.x, e.y - 200 * e.elevation, ex, ey);
             GameRenderCache::ExitCell cell;
             cell.wx = float(ex) + 16.0f;
             cell.wy = float(ey) + 8.0f;
@@ -201,24 +214,57 @@ void buildGameCache(const Location& loc, const ProjectState& st, SpriteManager* 
             cache.exits.push_back(cell);
             continue;
         }
-        if (e.fidType == 0 && e.fidNum == 0) continue;
+        if (e.fidType == 0 && e.fidNum == 0 && e.artPath.empty()) continue;
+        if (e.targetHide) continue;  // FOnline AlwaysHideSprite — служебный блокер, не рисуется
         if (kindMask >= 0 && !(kindMask & (1 << static_cast<int>(e.kind)))) continue;
 
-        const int dir = (e.dir >= 0 && e.dir < 6) ? e.dir : 0;
-        const auto s = sprites->sprite(e.fidType, e.fidNum, 0, dir);
-        if (s.tex == nullptr) continue;
-        int sx, sy;
-        gameObjProjection(e.x, e.y, sx, sy);
-        const float ax = float(sx) + 16.0f + float(s.fx);
-        const float ay = float(sy) + 8.0f + float(s.fy);
-        GameSpriteItem gi{ax, ay, s.w, s.h, s.tex, true, e.localId};
-        gi.path = s.path;
-        gi.framesPerDir = s.framesPerDir;
-        gi.fps = s.fps;
-        gi.dir = dir;
-        gi.animated = (s.framesPerDir > 1 && s.fps > 0) && animOn(e.localId);
-        tmp.push_back({&e, float(sy), gi});
-        acc(ax - s.w * 0.5f, ay - s.h, float(s.w), float(s.h));
+        int dir = e.dir;
+        if (dir >= 6) dir = (((dir % 360) + 30) / 60) % 6;  // FOnline Dir в градусах -> 0..5
+        if (dir < 0 || dir >= 6) dir = 0;
+        const bool isTargetTile = e.kind == ProtoType::Tile && !e.artPath.empty();
+        const auto s = !e.artPath.empty() ? sprites->spriteByPath(e.artPath, dir)
+                                          : sprites->sprite(e.fidType, e.fidNum, 0, dir);
+        // Мультигексные тайлы FOnline: спрайт рисуется в каждом гексе сетки
+        // (клиент: MapView::AddItemToField -> DrawHexItem для каждой записи MultihexMesh).
+        int hexCount = 1;
+        const bool expandMesh = e.targetDrawMesh && !e.targetMesh.empty();
+        if (expandMesh) hexCount += static_cast<int>(e.targetMesh.size());
+        for (int h = 0; h < hexCount; ++h) {
+            const int hx = h == 0 ? e.x : e.targetMesh[static_cast<size_t>(h - 1)].first;
+            const int hy = h == 0 ? e.y : e.targetMesh[static_cast<size_t>(h - 1)].second;
+            int sx, sy;
+            gameObjProjection(hx, hy - 200 * e.elevation, sx, sy);
+            const float ax = float(sx) + 16.0f + float(s.fx);
+            const float ay = float(sy) + 8.0f + float(s.fy);
+            if (s.tex == nullptr) {
+                // Нет арта — рисуем маркер, чтобы объект не пропадал.
+                GameSpriteItem gi{float(sx) + 16.0f, float(sy) + 8.0f, 12, 6, nullptr, true,
+                                  e.localId};
+                gi.marker = true;
+                gi.markerColor = kindMarkerColor(e.kind);
+                if (isTargetTile) {
+                    (e.targetIsRoof ? cache.roofs : cache.floors).push_back(gi);
+                    acc(gi.wx, gi.wy, float(gi.w), float(gi.h));
+                } else {
+                    tmp.push_back({&e, float(sy), gi});
+                }
+                continue;
+            }
+            GameSpriteItem gi{ax, ay, s.w, s.h, s.tex, true, e.localId};
+            gi.path = s.path;
+            gi.framesPerDir = s.framesPerDir;
+            gi.fps = s.fps;
+            gi.dir = dir;
+            gi.animated = (s.framesPerDir > 1 && s.fps > 0) && animOn(e.localId);
+            if (isTargetTile) {
+                // Тайлы FOnline — это пол/крыша: отдельный слой, поверх не рисуем как объект.
+                (e.targetIsRoof ? cache.roofs : cache.floors).push_back(gi);
+                acc(ax - s.w * 0.5f, ay - s.h, float(s.w), float(s.h));
+                continue;
+            }
+            tmp.push_back({&e, float(sy), gi});
+            acc(ax - s.w * 0.5f, ay - s.h, float(s.w), float(s.h));
+        }
     }
     std::sort(tmp.begin(), tmp.end(), [](const SortKey& a, const SortKey& b) {
         if (a.depth != b.depth) return a.depth < b.depth;
@@ -233,7 +279,7 @@ void buildGameCache(const Location& loc, const ProjectState& st, SpriteManager* 
         for (const auto& e : loc.entities) {
             if (e.elevation != elevation || e.inventory.empty()) continue;
             int sx, sy;
-            gameObjProjection(e.x, e.y, sx, sy);
+            gameObjProjection(e.x, e.y - 200 * e.elevation, sx, sy);
             const float pax = float(sx) + 16.0f;
             const float pay = float(sy) + 8.0f;
             int idx = 0;
@@ -282,7 +328,7 @@ int pickExitCell(const GameRenderCache& cache, const Camera& cam, float screenX,
 
 bool gameEntityWorld(const Entity& e, float& wx, float& wy) {
     int sx, sy;
-    gameObjProjection(e.x, e.y, sx, sy);
+    gameObjProjection(e.x, e.y - 200 * e.elevation, sx, sy);
     wx = float(sx) + 16.0f;
     wy = float(sy) + 8.0f;
     return true;

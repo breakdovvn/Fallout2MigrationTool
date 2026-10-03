@@ -23,6 +23,20 @@ bool parsePair(const std::string& v, int& x, int& y) {
     std::istringstream ss(s);
     return static_cast<bool>(ss >> x >> y);
 }
+
+// Извлекает все пары из строки вида: "136 28" "138 28" (с продолжением через '\').
+void parseQuotedPairs(const std::string& s, std::vector<std::pair<int, int>>& out) {
+    size_t pos = 0;
+    while (true) {
+        const size_t a = s.find('"', pos);
+        if (a == std::string::npos) break;
+        const size_t b = s.find('"', a + 1);
+        if (b == std::string::npos) break;
+        int x = 0, y = 0;
+        if (parsePair(s.substr(a + 1, b - a - 1), x, y)) out.emplace_back(x, y);
+        pos = b + 1;
+    }
+}
 }  // namespace
 
 bool loadFomap(const std::string& path, TargetMap& out) {
@@ -35,16 +49,24 @@ bool loadFomap(const std::string& path, TargetMap& out) {
 
     TargetObject cur;
     bool haveCur = false;
+    bool inMultihex = false;  // продолжение MultihexMesh/MultihexLines (строки с '\')
     auto flush = [&]() {
         if (haveCur && !cur.proto.empty()) out.objects.push_back(cur);
         cur = TargetObject{};
         haveCur = false;
+        inMultihex = false;
     };
 
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') line.pop_back();
         const std::string t = trim(line);
-        if (t.empty() || t[0] == ';' || t[0] == '#') continue;
+        if (t.empty()) continue;
+        if (inMultihex) {
+            parseQuotedPairs(t, cur.multihex);
+            if (t.back() != '\\') inMultihex = false;
+            continue;
+        }
+        if (t[0] == ';' || t[0] == '#') continue;
 
         if (t.front() == '[') {
             flush();
@@ -76,6 +98,9 @@ bool loadFomap(const std::string& path, TargetMap& out) {
                 parsePair(val, cur.x, cur.y);
             } else if (key == "Dir") {
                 cur.dir = std::atoi(val.c_str());
+            } else if (key == "MultihexMesh" || key == "MultihexLines") {
+                parseQuotedPairs(val, cur.multihex);
+                inMultihex = !t.empty() && t.back() == '\\';
             }
         }
     }

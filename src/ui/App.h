@@ -5,6 +5,7 @@
 
 #include "core/FomapReader.h"
 #include "core/Model.h"
+#include "core/WorldMap.h"
 #include "project/MigrationProject.h"
 #include "render/Graphics.h"
 #include "source/MsgReader.h"
@@ -20,6 +21,7 @@ struct AppConfig {
     std::string gameDat = "E:\\Games\\Fallout 2\\master.dat";
     std::string critterDat = "E:\\Games\\Fallout 2\\critter.dat";
     std::string targetMapsDir = "E:\\Games\\fonline-tla\\Maps";
+    std::string targetProtoDir = "E:\\Games\\fonline-tla";  // где искать *.foitem/.focr/.fopro
     // Русские тексты Fallout 2 (проверено: id совпадают с F2-прототипами).
     std::string russianTextDir = "E:\\Games\\Fallout 2 RUS\\data\\text\\english\\game";
     std::string russianDat;      // русский master.dat (для извлечения pro_*.msg)
@@ -27,7 +29,8 @@ struct AppConfig {
     std::string mapEntry = "maps\\artemple.map";   // путь внутри .dat
     std::string locationId = "ArroyoTemple";
     std::string testSwitchMap;  // для диагностики: вторая карта при --switch-test
-    std::string title = "Fallout 2 -> FOnline Migration Tool (MVP-1)";
+    std::string targetFile;     // диагностика: .fomap для --dump-target
+    std::string title = "Fallout 2 -> FOnline Migration Tool";
 };
 
 class App {
@@ -35,6 +38,8 @@ public:
     int run(const AppConfig& cfg);
     // Без окна: провижининг + разбор + сводка. Для проверки/тестов.
     int runHeadless(const AppConfig& cfg);
+    // Диагностика просмотра .fomap: разбор + сборка кэша спрайтов + статистика.
+    int runTargetDump(const AppConfig& cfg);
 
 private:
     bool initSdl();
@@ -53,6 +58,10 @@ private:
     void buildMapIndex();
     std::string mapEntryForId(int id);
     void loadTargetList();
+    void loadTargetProtos();
+    void registerFonlineArtRoots();
+    bool protoFlag(const std::string& name, const std::map<std::string, int8_t>& flags) const;
+    std::string targetPicMap(const std::string& name) const;
     void selectTarget(const std::string& file);
     void drawTarget();
 
@@ -65,6 +74,8 @@ private:
     void drawMapCanvas();
     void drawInventoryPopup();
     void drawWorldWindow();
+    void drawSettings();
+    void reinit();
 
     AppConfig _cfg;
     MigrationProject _project;
@@ -86,9 +97,22 @@ private:
     std::string _targetDir;                   // папка с целевыми .fomap (fonline-tla/Maps)
     std::vector<std::string> _targetFiles;    // найденные .fomap
     TargetMap _target;                        // прочитанная целевая карта
+    WorldMap _world;                          // глобальная карта (CITY/MAPS)
+    std::map<std::string, std::string> _protoPicMap;  // target proto name -> PicMap (art path)
+    std::map<std::string, std::string> _protoParent;  // target proto name -> $Parent
+    std::map<std::string, int8_t> _protoIsTile;   // IsTile (наследуется)
+    std::map<std::string, int8_t> _protoIsRoof;   // IsRoofTile
+    std::map<std::string, int8_t> _protoHide;     // AlwaysHideSprite
+    std::map<std::string, int8_t> _protoDrawMesh;  // DrawMultihexMesh/DrawMultihexLines
+    MsgFile _worldMsgEn, _worldMsgRu;         // имена входов/городов
+    int _selArea = -1;                        // выбранный регион
     bool _fitPending = false;   // «Вписать»: показать всю карту
     bool _openView = true;      // при открытии карты: приближённый вид по центру
     bool _worldOpen = false;    // окно «Локации/регионы»
+    bool _settingsOpen = false; // окно настроек путей
+    char _gameDirBuf[512] = "";
+    char _fonlineDirBuf[512] = "";
+    bool _targetMode = false;   // просмотр .fomap (маркеры, без арта)
     bool _centerOnSelected = false;      // перенести камеру к выбранному
     bool _scrollListToSelected = false;  // прокрутить список к выбранному
     int _kindFilter = -1;  // -1 = все

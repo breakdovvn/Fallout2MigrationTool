@@ -85,6 +85,11 @@ public:
     int framesPerDir(uint8_t type, uint16_t num);  // >1 => анимируемый спрайт
     // Батч-предзагрузка ВСЕХ артов карты (объекты + пол + крыши) одним/двумя вызовами dat2.
     void ensureMapArts(const Location& loc);
+    // Батч-предзагрузка артов по явным путям (target-прототипы).
+    void ensureArts(const std::vector<std::string>& artPaths);
+    // Дополнительные корни арта (например, fonline-tla/Resources/FOnline).
+    void addArtRoot(const std::string& root) { _artRoots.push_back(root); }
+    void clearArtRoots() { _artRoots.clear(); }
 
     // Готовая к отрисовке ссылка на спрайт (текстура + размеры + смещение кадра).
     struct SpriteRef {
@@ -99,9 +104,12 @@ public:
     };
     SpriteRef sprite(uint8_t type, uint16_t num, int frameIndex, int dir);
     SpriteRef tileSprite(uint16_t tileId, int frameIndex);
+    // Спрайт по явному пути к FRM (target-прототипы FOnline: PicMap = art/.../X.FRM).
+    SpriteRef spriteByPath(const std::string& artPath, int dir);
 
 private:
     std::string resolveArtLocal(uint8_t type, uint16_t num);  // локальный путь к .frm или ""
+    std::string localArtPath(const std::string& artPath) const;  // raw/ + art roots
     std::string artFrmName(uint8_t type, uint16_t num) const;
     bool extractEntry(const std::string& datPath, const std::string& entry, std::string& outLocal);
     const FrmImage* loadFrm(const std::string& path);
@@ -111,6 +119,7 @@ private:
     std::string _dat2Exe;
     std::string _masterDat;
     std::string _critterDat;
+    std::vector<std::string> _artRoots;  // дополнительные каталоги арта (FOnline resources)
     Palette _pal;
     bool _artReady = false;
 

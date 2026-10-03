@@ -216,8 +216,9 @@ bool MapReader::read(const std::string& mapPath, const std::string& containerFil
                             r.u32();
                             e.isExit = true; e.exitKind = 5;
                             break;
-                        case 1:  // stair
-                            e.exitDestHex = r.u32();
+                        case 1:  // stair: DestElev u8, pad u8, DestTile u16, DestMap u32
+                            e.exitDestElev = r.u8(); r.u8();
+                            e.exitDestHex = r.u16();
                             e.exitDestMap = r.u32();
                             e.isExit = true; e.exitKind = 2;
                             break;
@@ -226,9 +227,16 @@ bool MapReader::read(const std::string& mapPath, const std::string& containerFil
                             e.isExit = true; e.exitKind = 3;
                             break;
                         case 3:
-                        case 4:  // ladder
-                            e.exitDestHex = r.u32();
-                            if (version == 20) e.exitDestMap = r.u32();
+                        case 4:  // ladder: DestElev u8, pad u8, DestTile u16, [v20: DestMap u32]
+                            e.exitDestElev = r.u8(); r.u8();
+                            e.exitDestHex = r.u16();
+                            if (version == 20) {
+                                const uint32_t dm = r.u32();
+                                // Отбрасываем заведомо мусорные значения (не карта).
+                                if (dm != 0u && dm != 0xFFFFFFFFu && dm != 0xFFFFFFFEu && dm < 100000u) {
+                                    e.exitDestMap = dm;
+                                }
+                            }
                             e.isExit = true; e.exitKind = 4;
                             break;
                         default: break;

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace f2mt {
@@ -81,11 +82,17 @@ struct Entity {
     // exit-информация (переходы)
     bool isExit = false;
     int exitKind = 0;         // 1 grid, 2 stair, 3 elev, 4 ladder, 5 door
+    int exitDestElev = 0;     // целевой этаж (для лестниц/стремянок)
     uint32_t exitDestHex = 0;
     uint32_t exitDestMap = 0;
     // прочее
+    std::string artPath;  // явный путь к FRM (для target-прототипов FOnline)
     std::vector<InventoryEntry> inventory;
     std::string targetProto;  // имя целевого прототипа FOnline (пусто до маппинга)
+    bool targetHide = false;  // target FOnline: AlwaysHideSprite — не рисуется
+    bool targetIsRoof = false;  // target FOnline: IsRoofTile (рисуется поверх)
+    bool targetDrawMesh = false;  // target FOnline: DrawMultihexMesh — рисовать во всех гексах
+    std::vector<std::pair<int, int>> targetMesh;  // гексы MultihexMesh/MultihexLines
     SourceRef source;
 
     // Флаги объекта Fallout 2 (obj_types.h).

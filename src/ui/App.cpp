@@ -6,7 +6,9 @@
 #include <cctype>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <map>
+#include <set>
 #include <string>
 
 #include <imgui.h>
@@ -47,6 +49,37 @@ int App::run(const AppConfig& cfg) {
 
     _project.openOrCreate(_cfg.projectDir);
 
+    // Ранее сохранённые пути (игра / fonline) применяем до загрузки источника.
+    {
+        ProjectState pre;
+        if (_project.loadState(pre)) {
+            _state.gameDir = pre.gameDir;
+            _state.fonlineDir = pre.fonlineDir;
+        }
+        if (!_state.gameDir.empty()) {
+            std::filesystem::path g(_state.gameDir);
+            if (lower(g.extension().string()) == ".dat") {
+                _cfg.gameDat = g.string();
+                const std::filesystem::path c = g.parent_path() / "critter.dat";
+                if (std::filesystem::exists(c)) _cfg.critterDat = c.string();
+            } else {
+                const std::filesystem::path m = g / "master.dat";
+                if (std::filesystem::exists(m)) _cfg.gameDat = m.string();
+                const std::filesystem::path c = g / "critter.dat";
+                if (std::filesystem::exists(c)) _cfg.critterDat = c.string();
+            }
+        }
+        if (!_state.fonlineDir.empty()) {
+            _cfg.targetProtoDir = _state.fonlineDir;
+            _cfg.targetMapsDir = (std::filesystem::path(_state.fonlineDir) / "Maps").string();
+        }
+        std::snprintf(_gameDirBuf, sizeof(_gameDirBuf), "%s",
+                      _state.gameDir.empty() ? _cfg.gameDat.c_str() : _state.gameDir.c_str());
+        std::snprintf(_fonlineDirBuf, sizeof(_fonlineDirBuf), "%s",
+                      _state.fonlineDir.empty() ? _cfg.targetProtoDir.c_str()
+                                                : _state.fonlineDir.c_str());
+    }
+
     if (!ensureSource()) {
         _status = "Не удалось подготовить источник (dat2.exe / .dat).";
     } else if (!parseSource()) {
@@ -59,6 +92,7 @@ int App::run(const AppConfig& cfg) {
         pal.load((std::filesystem::path(_project.sourceRawDir()) / "color.pal").string());
         _sprites.init(_renderer, _project.sourceRawDir(), _cfg.dat2Exe, _cfg.gameDat, _cfg.critterDat,
                       pal);
+        registerFonlineArtRoots();
         _sprites.ensureMapArts(_loc);
         loadProtoMsgs();
     }
@@ -161,6 +195,214 @@ int App::runHeadless(const AppConfig& cfg) {
     return errs == 0 ? 0 : 4;
 }
 
+int App::runTargetDump(const AppConfig& cfg) {
+    _cfg = cfg;
+    if (!initSdl()) return 1;
+    _project.openOrCreate(_cfg.projectDir);
+    if (!ensureSource()) {
+        std::printf("ERR source: %s\n", _status.c_str());
+        return 2;
+    }
+    if (!ensureArt()) {
+        std::printf("ERR art not ready\n");
+        return 3;
+    }
+    Palette pal;
+    pal.load((std::filesystem::path(_project.sourceRawDir()) / "color.pal").string());
+    _sprites.init(_renderer, _project.sourceRawDir(), _cfg.dat2Exe, _cfg.gameDat, _cfg.critterDat, pal);
+    registerFonlineArtRoots();
+    const bool sourceMode = _cfg.targetFile.empty();
+    if (sourceMode) {
+        if (!parseSource()) {
+            std::printf("ERR parse source\n");
+            return 4;
+        }
+        _sprites.setBrightness(_state.night ? _state.nightBrightness : _state.dayBrightness);
+        _sprites.ensureMapArts(_loc);
+        loadProtoMsgs();
+    } else {
+        loadProtoMsgs();  // заполняет _protoPicMap/_protoParent + loadTargetProtos
+        _targetDir = _cfg.targetMapsDir;
+        loadTargetList();
+        selectTarget(_cfg.targetFile);
+    }
+    buildGameCache(_loc, _state, &_sprites, _gameCache);
+
+    std::printf("=== %s DUMP: %s ===\n", sourceMode ? "SOURCE" : "TARGET", _cfg.targetFile.c_str());
+    std::printf("entities=%zu extras=%zu tileCells=%zu\n", _loc.entities.size(), _loc.entities.size(),
+                _loc.tiles.size());
+    int kind[6] = {0, 0, 0, 0, 0, 0};
+    int withArt = 0;
+    for (const auto& e : _loc.entities) {
+        kind[static_cast<int>(e.kind)]++;
+        if (!e.artPath.empty()) ++withArt;
+    }
+    std::printf("art=%d  kinds item=%d critter=%d scen=%d wall=%d tile=%d misc=%d\n", withArt, kind[0],
+                kind[1], kind[2], kind[3], kind[4], kind[5]);
+    std::printf("cache floors=%zu objects=%zu roofs=%zu exits=%zu\n", _gameCache.floors.size(),
+                _gameCache.objects.size(), _gameCache.roofs.size(), _gameCache.exits.size());
+    int tex = 0, marker = 0, empty = 0;
+    int ktex[6] = {0, 0, 0, 0, 0, 0}, kmark[6] = {0, 0, 0, 0, 0, 0};
+    // сопоставляем объекты кэша с сущностями по localId
+    for (const auto& it : _gameCache.objects) {
+        const Entity* pe = nullptr;
+        for (const auto& e : _loc.entities) {
+            if (e.localId == it.localId) { pe = &e; break; }
+        }
+        const int k = pe != nullptr ? static_cast<int>(pe->kind) : 5;
+        if (it.marker) { ++marker; ++kmark[k]; }
+        else if (it.tex != nullptr) { ++tex; ++ktex[k]; }
+        else ++empty;
+    }
+    std::printf("objects: textured=%d marker=%d empty=%d\n", tex, marker, empty);
+    for (int k = 0; k < 6; ++k) {
+        if (ktex[k] || kmark[k]) {
+            std::printf("  kind %d: textured=%d marker=%d\n", k, ktex[k], kmark[k]);
+        }
+    }
+    float minx = 1e9f, miny = 1e9f, maxx = -1e9f, maxy = -1e9f;
+    for (const auto& it : _gameCache.objects) {
+        minx = std::min(minx, it.wx - it.w * 0.5f);
+        maxx = std::max(maxx, it.wx + it.w * 0.5f);
+        miny = std::min(miny, it.wy - it.h);
+        maxy = std::max(maxy, it.wy);
+    }
+    std::printf("obj bounds x[%.0f..%.0f] y[%.0f..%.0f]\n", minx, maxx, miny, maxy);
+    int shown = 0;
+    for (const auto& e : _loc.entities) {
+        if (e.artPath.empty()) continue;
+        if (shown++ >= 5) break;
+        std::printf("  sample art '%s'\n", e.artPath.c_str());
+    }
+    // Диагностика: artPath есть, но спрайт не декодируется (маркер).
+    {
+        std::map<std::string, int> missByExt;
+        std::vector<std::string> missSamples;
+        std::set<std::string> seen;
+        for (const auto& e : _loc.entities) {
+            if (e.artPath.empty()) continue;
+            if (_sprites.spriteByPath(e.artPath, 0).tex != nullptr) continue;
+            std::string ext = std::filesystem::path(e.artPath).extension().string();
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            missByExt[ext]++;
+            if (seen.insert(e.artPath).second && missSamples.size() < 20) missSamples.push_back(e.artPath);
+        }
+        std::printf("missing art by ext:\n");
+        for (const auto& kv : missByExt) std::printf("  '%s' x%d\n", kv.first.c_str(), kv.second);
+        for (const auto& s : missSamples) std::printf("  MISS %s\n", s.c_str());
+        std::map<std::string, int> missByProto;
+        for (const auto& e : _loc.entities) {
+            if (e.artPath.empty()) continue;
+            if (_sprites.spriteByPath(e.artPath, 0).tex != nullptr) continue;
+            missByProto[e.targetProto]++;
+        }
+        std::printf("missing art by proto:\n");
+        int pn = 0;
+        for (const auto& kv : missByProto) {
+            if (pn++ >= 25) break;
+            std::printf("  %s x%d\n", kv.first.c_str(), kv.second);
+        }
+    }
+
+    // Программный рендер кэша в BMP (для визуальной проверки без GUI).
+    {
+        const int CW = 1400, CH = 900, MARGIN = 20;
+        const float bw = std::max(1.0f, maxx - minx);
+        const float bh = std::max(1.0f, maxy - miny);
+        const float scale = std::min((CW - 2.0f * MARGIN) / bw, (CH - 2.0f * MARGIN) / bh);
+        const float ox = MARGIN, oy = MARGIN;
+        std::vector<uint32_t> buf(static_cast<size_t>(CW) * CH, 0xFF101018u);
+        auto toPx = [&](float wx, float wy) { return ImVec2(ox + (wx - minx) * scale, oy + (wy - miny) * scale); };
+
+        Palette bright;
+        bright.load((std::filesystem::path(_project.sourceRawDir()) / "color.pal").string());
+        bright.setBrightness(5.0f);
+
+        auto fillAt = [&](int left, int top, int w, int h, uint32_t col) {
+            for (int dy = 0; dy < h; ++dy) {
+                const int py = top + dy;
+                if (py < 0 || py >= CH) continue;
+                for (int dx = 0; dx < w; ++dx) {
+                    const int px2 = left + dx;
+                    if (px2 < 0 || px2 >= CW) continue;
+                    buf[static_cast<size_t>(py) * CW + px2] = col;
+                }
+            }
+        };
+        auto blit = [&](const GameSpriteItem& it) {
+            if (it.marker || it.path.empty()) {
+                const ImVec2 p = toPx(it.wx, it.wy);
+                // Пол исходника (без path) заливаем серым, маркеры — их цветом.
+                const uint32_t col = it.marker ? it.markerColor : IM_COL32(70, 64, 55, 255);
+                const uint32_t rr = col & 0xFFu, gg = (col >> 8) & 0xFFu, bb = (col >> 16) & 0xFFu;
+                const uint32_t argb = 0xFF000000u | (rr << 16) | (gg << 8) | bb;
+                const int w = static_cast<int>(std::max(3.0f, it.w * scale));
+                const int h = static_cast<int>(std::max(3.0f, it.h * scale));
+                const int left = it.bottomAnchor ? static_cast<int>(p.x - w * 0.5f)
+                                                 : static_cast<int>(p.x);
+                const int top = it.bottomAnchor ? static_cast<int>(p.y - h) : static_cast<int>(p.y);
+                fillAt(left, top, w, h, argb);
+                return;
+            }
+            FrmImage img;
+            if (!img.load(it.path, bright)) return;
+            const DecodedFrame* fr = img.frame(0, it.dir);
+            if (fr == nullptr || fr->w <= 0) return;
+            const ImVec2 p = toPx(it.wx, it.wy);
+            const float w = it.w * scale, h = it.h * scale;
+            const float left = it.bottomAnchor ? p.x - w * 0.5f : p.x;
+            const float top = it.bottomAnchor ? p.y - h : p.y;
+            for (int dy = 0; dy < static_cast<int>(h); ++dy) {
+                const int py = static_cast<int>(top) + dy;
+                if (py < 0 || py >= CH) continue;
+                const int sy = std::clamp(static_cast<int>(dy / scale), 0, fr->h - 1);
+                for (int dx = 0; dx < static_cast<int>(w); ++dx) {
+                    const int px2 = static_cast<int>(left) + dx;
+                    if (px2 < 0 || px2 >= CW) continue;
+                    const int sx = std::clamp(static_cast<int>(dx / scale), 0, fr->w - 1);
+                    const uint32_t c = fr->rgba[static_cast<size_t>(sy) * fr->w + sx];
+                    if ((c >> 24) != 0) buf[static_cast<size_t>(py) * CW + px2] = c;
+                }
+            }
+        };
+        for (const auto& it : _gameCache.floors) blit(it);
+        for (const auto& it : _gameCache.objects) blit(it);
+        for (const auto& it : _gameCache.roofs) blit(it);
+
+        const std::string bmp = "target_dump.bmp";
+        std::ofstream outf(bmp, std::ios::binary);
+        if (outf) {
+            const int rowSize = CW * 3;
+            const int pad = (4 - (rowSize % 4)) % 4;
+            const int dataSize = (rowSize + pad) * CH;
+            const int fileSize = 54 + dataSize;
+            std::vector<unsigned char> hdr(54, 0);
+            hdr[0] = 'B'; hdr[1] = 'M';
+            auto put32 = [&](int off, int v) {
+                hdr[off] = v & 0xFF; hdr[off + 1] = (v >> 8) & 0xFF;
+                hdr[off + 2] = (v >> 16) & 0xFF; hdr[off + 3] = (v >> 24) & 0xFF;
+            };
+            auto put16 = [&](int off, int v) { hdr[off] = v & 0xFF; hdr[off + 1] = (v >> 8) & 0xFF; };
+            put32(2, fileSize); put32(10, 54); put32(14, 40);
+            put32(18, CW); put32(22, CH); put16(26, 1); put16(28, 24); put32(34, dataSize);
+            outf.write(reinterpret_cast<const char*>(hdr.data()), 54);
+            std::vector<unsigned char> row(rowSize + pad, 0);
+            for (int y = CH - 1; y >= 0; --y) {
+                for (int x = 0; x < CW; ++x) {
+                    const uint32_t c = buf[static_cast<size_t>(y) * CW + x];
+                    row[x * 3 + 0] = (c >> 0) & 0xFF;
+                    row[x * 3 + 1] = (c >> 8) & 0xFF;
+                    row[x * 3 + 2] = (c >> 16) & 0xFF;
+                }
+                outf.write(reinterpret_cast<const char*>(row.data()), rowSize + pad);
+            }
+            std::printf("rendered -> %s\n", bmp.c_str());
+        }
+    }
+    shutdownSdl();
+    return 0;
+}
+
 bool App::initSdl() {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) return false;
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
@@ -241,6 +483,7 @@ bool App::ensureSource() {
 }
 
 bool App::parseSource() {
+    _targetMode = false;
     const std::filesystem::path raw(_project.sourceRawDir());
     const std::filesystem::path mapPathFs = raw / _cfg.mapEntry;
     if (!std::filesystem::exists(mapPathFs)) {
@@ -272,7 +515,10 @@ bool App::ensureArt() {
                       std::filesystem::exists(raw / "text/russian/game/pro_item.msg");
     if (std::filesystem::exists(raw / "art/tiles/TILES.LST") &&
         std::filesystem::exists(raw / "color.pal") &&
-        std::filesystem::exists(raw / "text/english/game/pro_item.msg") && ruOk) {
+        std::filesystem::exists(raw / "text/english/game/pro_item.msg") &&
+        std::filesystem::exists(raw / "data/CITY.TXT") &&
+        std::filesystem::exists(raw / "data/MAPS.TXT") &&
+        std::filesystem::exists(raw / "text/english/game/WORLDMAP.MSG") && ruOk) {
         return true;
     }
     DatProvisioner master(_cfg.dat2Exe, _cfg.gameDat, raw.string());
@@ -290,7 +536,10 @@ bool App::ensureArt() {
                     "text\\english\\game\\pro_scen.msg",
                     "text\\english\\game\\pro_wall.msg",
                     "text\\english\\game\\pro_tile.msg",
-                    "text\\english\\game\\pro_misc.msg"});
+                    "text\\english\\game\\pro_misc.msg",
+                    "data\\CITY.TXT",
+                    "data\\MAPS.TXT",
+                    "text\\english\\game\\WORLDMAP.MSG"});
     if (std::filesystem::exists(_cfg.critterDat)) {
         DatProvisioner crit(_cfg.dat2Exe, _cfg.critterDat, raw.string());
         crit.extract({"art\\critters\\CRITTERS.LST"});
@@ -318,12 +567,180 @@ void App::loadTargetList() {
     std::sort(_targetFiles.begin(), _targetFiles.end());
 }
 
+std::string App::targetPicMap(const std::string& name) const {
+    std::string cur = lower(name);
+    for (int guard = 0; guard < 32 && !cur.empty(); ++guard) {
+        const auto it = _protoPicMap.find(cur);
+        if (it != _protoPicMap.end() && !it->second.empty()) return it->second;
+        const auto p = _protoParent.find(cur);
+        if (p == _protoParent.end()) break;
+        cur = p->second;
+    }
+    return {};
+}
+
+void App::loadTargetProtos() {
+    _protoPicMap.clear();
+    _protoParent.clear();
+    _protoIsTile.clear();
+    _protoIsRoof.clear();
+    _protoHide.clear();
+    _protoDrawMesh.clear();
+    auto flagValue = [](const std::string& v) -> int8_t {
+        const std::string lv = lower(v);
+        if (lv == "true" || lv == "1") return 1;
+        if (lv == "false" || lv == "0") return 0;
+        return -1;  // не распознано — не задаём
+    };
+    std::error_code ec;
+    if (!std::filesystem::exists(_cfg.targetProtoDir, ec)) return;
+    for (const auto& de : std::filesystem::recursive_directory_iterator(_cfg.targetProtoDir, ec)) {
+        if (!de.is_regular_file()) continue;
+        std::string ext = lower(de.path().extension().string());
+        if (ext != ".foitem" && ext != ".focr" && ext != ".fopro") continue;
+        std::ifstream in(de.path());
+        if (!in) continue;
+        std::string line, name, parent, pic;
+        int8_t isTile = -1, isRoof = -1, hide = -1, drawMesh = -1;
+        auto flush = [&]() {
+            if (!name.empty()) {
+                const std::string key = lower(name);
+                if (!pic.empty()) _protoPicMap[key] = pic;
+                if (!parent.empty()) _protoParent[key] = lower(parent);
+                if (isTile >= 0) _protoIsTile[key] = isTile;
+                if (isRoof >= 0) _protoIsRoof[key] = isRoof;
+                if (hide >= 0) _protoHide[key] = hide;
+                if (drawMesh >= 0) _protoDrawMesh[key] = drawMesh;
+            }
+            name.clear();
+            parent.clear();
+            pic.clear();
+            isTile = isRoof = hide = drawMesh = -1;
+        };
+        while (std::getline(in, line)) {
+            const std::string t = line;
+            const size_t eq = t.find('=');
+            if (eq == std::string::npos) continue;
+            std::string k = t.substr(0, eq);
+            std::string v = t.substr(eq + 1);
+            const size_t a = k.find_first_not_of(" \t"); if (a == std::string::npos) continue;
+            const size_t b = k.find_last_not_of(" \t"); k = k.substr(a, b - a + 1);
+            const size_t va = v.find_first_not_of(" \t"); if (va == std::string::npos) continue;
+            const size_t vb = v.find_last_not_of(" \t\r"); v = v.substr(va, vb - va + 1);
+            // Снимаем кавычки, если значение в кавычках.
+            if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+            if (k == "$Name") { flush(); name = v; }  // запись на каждый $Name
+            else if (k == "$Parent") parent = v;
+            else if (k == "PicMap") pic = v;
+            else if (k == "ModelName" && pic.empty()) pic = v;  // у криттеров PicMap нет
+            else if (k == "IsTile") isTile = flagValue(v);
+            else if (k == "IsRoofTile") isRoof = flagValue(v);
+            else if (k == "AlwaysHideSprite") hide = flagValue(v);
+            else if (k == "DrawMultihexMesh" || k == "DrawMultihexLines") {
+                const int8_t f = flagValue(v);
+                if (f > drawMesh) drawMesh = f;  // достаточно любого True
+            }
+        }
+        flush();
+    }
+}
+
+bool App::protoFlag(const std::string& name, const std::map<std::string, int8_t>& flags) const {
+    std::string cur = lower(name);
+    for (int guard = 0; guard < 32 && !cur.empty(); ++guard) {
+        const auto it = flags.find(cur);
+        if (it != flags.end()) return it->second != 0;
+        const auto p = _protoParent.find(cur);
+        if (p == _protoParent.end()) break;
+        cur = p->second;
+    }
+    return false;
+}
+
+void App::registerFonlineArtRoots() {
+    _sprites.clearArtRoots();
+    if (_cfg.targetProtoDir.empty()) return;
+    const std::filesystem::path base(_cfg.targetProtoDir);
+    const std::filesystem::path candidates[] = {
+        base / "Resources" / "FOnline",
+        base / "Baking" / "FOnline",
+        base,
+    };
+    std::error_code ec;
+    for (const auto& c : candidates) {
+        if (std::filesystem::is_directory(c, ec)) _sprites.addArtRoot(c.string());
+    }
+}
+
 void App::selectTarget(const std::string& file) {
     const std::string path = (std::filesystem::path(_targetDir) / file).string();
-    if (loadFomap(path, _target)) {
-        _target.loaded = true;
-        _status = "Target: " + _target.name + " (" + std::to_string(_target.objects.size()) + ")";
+    if (!loadFomap(path, _target)) return;
+    _target.loaded = true;
+    if (_target.name.empty()) _target.name = std::filesystem::path(file).stem().string();
+    registerFonlineArtRoots();
+
+    // Конвертация .fomap -> просматриваемая модель (арт по PicMap/ModelName).
+    _loc = Location{};
+    _loc.id = _target.name;
+    _loc.displayName = _target.name;
+    _loc.mapName = _target.name;
+    _loc.grid.hexWidth = 200;
+    _loc.grid.hexHeight = 200;
+    _loc.grid.tileWidth = 100;
+    _loc.grid.tileHeight = 100;
+    _loc.grid.elevationCount = 1;
+    _loc.grid.tileLen = 10000;
+    _loc.tiles.assign(10000, TileCell{});
+    int id = 1;
+    for (const auto& o : _target.objects) {
+        Entity e;
+        e.localId = id++;
+        e.x = o.x;
+        e.y = o.y;
+        e.elevation = 0;
+        e.dir = o.dir;
+        const bool isTile = protoFlag(o.proto, _protoIsTile);
+        if (o.critter) {
+            e.kind = ProtoType::Critter;
+        } else if (isTile) {
+            e.kind = ProtoType::Tile;
+        } else if (o.proto.rfind("wall", 0) == 0) {
+            e.kind = ProtoType::Wall;
+        } else if (o.proto.rfind("roof", 0) == 0) {
+            e.kind = ProtoType::Tile;
+        } else if (o.proto.rfind("generic", 0) == 0 || o.proto.rfind("scenery", 0) == 0) {
+            e.kind = ProtoType::Scenery;
+        } else {
+            e.kind = ProtoType::Item;
+        }
+        e.targetHide = protoFlag(o.proto, _protoHide);
+        e.targetIsRoof = isTile && protoFlag(o.proto, _protoIsRoof);
+        e.targetMesh = o.multihex;
+        e.targetDrawMesh = protoFlag(o.proto, _protoDrawMesh);
+        e.source.containerFile = path;
+        e.source.entryPath = file;
+        e.targetProto = o.proto;  // имя целевого прототипа
+        e.artPath = targetPicMap(o.proto);
+        _loc.entities.push_back(e);
     }
+    _targetMode = true;
+    _openView = false;
+    _fitPending = true;  // вписать всю карту: контент может быть разреженным
+    _gameCache.valid = false;
+    _state.selectedEntity = -1;
+    _state.elevation = 0;  // target-карты одно-уровневые
+    int withArt = 0;
+    std::vector<std::string> artPaths;
+    for (const auto& e : _loc.entities) {
+        if (!e.artPath.empty()) {
+            ++withArt;
+            artPaths.push_back(e.artPath);
+        }
+    }
+    _sprites.ensureArts(artPaths);  // батч-загрузка арта target одним вызовом dat2
+    _gameCache.valid = false;
+    _status = "Target: " + _target.name + " (" + std::to_string(_target.objects.size()) +
+              ", с артом " + std::to_string(withArt) + ")";
 }
 
 void App::drawTarget() {
@@ -400,6 +817,12 @@ void App::loadProtoMsgs() {
         const std::filesystem::path f = ru / (std::string(kNames[i]) + ".msg");
         if (std::filesystem::exists(f)) _protoMsgRu[i].load(f.string());
     }
+    // Имена городов/входов мировой карты (EN + RU).
+    _worldMsgEn.load((en / "WORLDMAP.MSG").string());
+    const std::filesystem::path wru = ru / "WORLDMAP.MSG";
+    if (std::filesystem::exists(wru)) _worldMsgRu.load(wru.string());
+    loadWorldMap((raw / "data").string(), _world);  // CITY.TXT + MAPS.TXT
+    loadTargetProtos();
 }
 
 std::string App::nameProto(uint8_t type, uint32_t textId) const {
@@ -428,51 +851,148 @@ std::string App::nameOf(const Entity& e) const { return nameProto(e.proto.type, 
 
 std::string App::describe(const Entity& e) const { return descProto(e.proto.type, e.textId); }
 
-void App::drawWorldWindow() {
-    if (!_worldOpen) return;
-    ImGui::SetNextWindowSize(ImVec2(520, 480), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Локации / регионы", &_worldOpen)) {
+void App::reinit() {
+    // Пути в _cfg уже обновлены. Сбрасываем кэш исходников и перечитываем.
+    std::error_code ec;
+    const std::filesystem::path raw(_project.sourceRawDir());
+    std::filesystem::remove_all(raw, ec);
+    std::filesystem::create_directories(raw, ec);
+    _gameCache.valid = false;
+    _openView = true;
+
+    if (!ensureSource()) {
+        _status = "Источник не подготовлен (проверь путь к игре/master.dat).";
+        return;
+    }
+    if (ensureArt()) {
+        Palette pal;
+        pal.load((raw / "color.pal").string());
+        _sprites.init(_renderer, _project.sourceRawDir(), _cfg.dat2Exe, _cfg.gameDat, _cfg.critterDat,
+                      pal);
+        registerFonlineArtRoots();
+        _sprites.setBrightness(_state.night ? _state.nightBrightness : _state.dayBrightness);
+        loadProtoMsgs();
+    }
+    loadMapList();
+    loadTargetList();
+    loadTargetProtos();
+    parseSource();
+    _status = "Настройки применены.";
+}
+
+void App::drawSettings() {
+    if (!_settingsOpen) return;
+    ImGui::SetNextWindowSize(ImVec2(720, 220), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Настройки путей", &_settingsOpen)) {
         ImGui::End();
         return;
     }
-    static char filter[64] = "";
+    ImGui::TextUnformatted("Папка игры Fallout 2 или путь к master.dat:");
     ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##wf", "фильтр...", filter, sizeof(filter));
-    const std::string fl = lower(filter);
+    ImGui::InputText("##gamedir", _gameDirBuf, sizeof(_gameDirBuf));
+    ImGui::TextUnformatted("Папка проекта FOnline (fonline-tla):");
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputText("##fonlinedir", _fonlineDirBuf, sizeof(_fonlineDirBuf));
 
-    std::map<std::string, std::vector<std::string>> groups;
-    for (const auto& m : _availableMaps) {
-        if (!fl.empty() && lower(m).find(fl) == std::string::npos) continue;
-        std::string stem = std::filesystem::path(m).stem().string();
-        std::string p;
-        for (char c : stem) {
-            if (std::isalpha(static_cast<unsigned char>(c))) {
-                p.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    ImGui::Spacing();
+    ImGui::TextDisabled("Текущий master.dat: %s", _cfg.gameDat.c_str());
+    ImGui::TextDisabled("Текущий critter.dat: %s", _cfg.critterDat.c_str());
+    ImGui::TextDisabled("FOnline Maps: %s", _cfg.targetMapsDir.c_str());
+
+    if (ImGui::Button("Применить")) {
+        _state.gameDir = _gameDirBuf;
+        _state.fonlineDir = _fonlineDirBuf;
+
+        // Выводим gameDat/critterDat из указанной папки/файла.
+        std::filesystem::path g(_state.gameDir);
+        if (!g.empty()) {
+            std::string ext = lower(g.extension().string());
+            if (ext == ".dat") {
+                _cfg.gameDat = g.string();
+                const std::filesystem::path c = g.parent_path() / "critter.dat";
+                if (std::filesystem::exists(c)) _cfg.critterDat = c.string();
             } else {
-                break;
+                const std::filesystem::path m = g / "master.dat";
+                if (std::filesystem::exists(m)) _cfg.gameDat = m.string();
+                const std::filesystem::path c = g / "critter.dat";
+                if (std::filesystem::exists(c)) _cfg.critterDat = c.string();
             }
         }
-        if (p.empty()) p = stem.substr(0, std::min<size_t>(3, stem.size()));
-        groups[p].push_back(m);
+        if (!_state.fonlineDir.empty()) {
+            _cfg.targetProtoDir = _state.fonlineDir;
+            _cfg.targetMapsDir = (std::filesystem::path(_state.fonlineDir) / "Maps").string();
+        }
+        _project.saveState(_state);
+        reinit();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(путь сохраняется в state.json)");
+
+    ImGui::End();
+}
+
+void App::drawWorldWindow() {
+    if (!_worldOpen) return;
+    ImGui::SetNextWindowSize(ImVec2(780, 520), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("\u0413\u043b\u043e\u0431\u0430\u043b\u044c\u043d\u0430\u044f \u043a\u0430\u0440\u0442\u0430", &_worldOpen)) {
+        ImGui::End();
+        return;
     }
 
-    ImGui::BeginChild("wlist", ImVec2(0, 0), true);
-    for (auto& kv : groups) {
-        if (ImGui::TreeNodeEx(kv.first.c_str(), ImGuiTreeNodeFlags_DefaultOpen, "%s  (%zu)",
-                              kv.first.c_str(), kv.second.size())) {
-            for (const auto& m : kv.second) {
-                if (ImGui::Selectable(m.c_str())) {
-                    selectMap(m);
-                    _worldOpen = false;
+    ImGui::BeginChild("wmlist", ImVec2(330, 0), true);
+    for (auto& a : _world.areas) {
+        char lbl[128];
+        std::snprintf(lbl, sizeof(lbl), "%s  [%s]", a.name.c_str(), a.size.c_str());
+        if (ImGui::TreeNodeEx(reinterpret_cast<void*>(static_cast<intptr_t>(a.index)),
+                              ImGuiTreeNodeFlags_DefaultOpen, "%s", lbl)) {
+            for (auto& ent : a.entrances) {
+                const int mid = 200 + a.index * 10 + ent.index;
+                const std::string* s = nullptr;
+                if (_state.langRu && _worldMsgRu.get(mid)) s = _worldMsgRu.get(mid);
+                if (s == nullptr) s = _worldMsgEn.get(mid);
+                const std::string name = s != nullptr ? *s : ent.lookupName;
+                char el[192];
+                std::snprintf(el, sizeof(el), "%s%s##%d_%d", ent.on ? "" : "(off) ", name.c_str(),
+                              a.index, ent.index);
+                if (ImGui::Selectable(el)) {
+                    const std::string mf = _world.mapFileFor(ent.lookupName);
+                    if (!mf.empty()) {
+                        selectMap(mf);
+                        _worldOpen = false;
+                    } else {
+                        _status = "No map: " + ent.lookupName;
+                    }
                 }
             }
             ImGui::TreePop();
         }
     }
     ImGui::EndChild();
+
+    ImGui::SameLine();
+    ImGui::BeginChild("wmmap", ImVec2(0, 0), true);
+    const ImVec2 sz = ImGui::GetContentRegionAvail();
+    const ImVec2 org = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(org, ImVec2(org.x + sz.x, org.y + sz.y), IM_COL32(18, 24, 18, 255));
+    int maxX = 1, maxY = 1;
+    for (const auto& a : _world.areas) {
+        maxX = std::max(maxX, a.x);
+        maxY = std::max(maxY, a.y);
+    }
+    const float sx = sz.x / (maxX * 1.15f);
+    const float sy = sz.y / (maxY * 1.15f);
+    for (const auto& a : _world.areas) {
+        const ImVec2 p(org.x + a.x * sx, org.y + a.y * sy);
+        const float r = a.size == "Large" ? 9.0f : (a.size == "Medium" ? 6.0f : 4.0f);
+        dl->AddCircleFilled(p, r, a.index == _selArea ? IM_COL32(255, 220, 80, 255)
+                                                      : IM_COL32(120, 200, 120, 255), 16);
+        dl->AddText(ImVec2(p.x + r + 2.0f, p.y - 7.0f), IM_COL32(230, 230, 230, 255), a.name.c_str());
+    }
+    ImGui::EndChild();
+
     ImGui::End();
 }
-
 void App::drawInventoryPopup() {
     if (!_selOnScreen || _state.selectedEntity <= 0 || _invOpenFor != _state.selectedEntity) return;
     const Entity* e = nullptr;
@@ -536,6 +1056,7 @@ void App::loadMapList() {
 }
 
 void App::selectMap(const std::string& entry) {
+    _targetMode = false;
     _cfg.mapEntry = entry;
     _cfg.locationId = std::filesystem::path(entry).stem().string();
 
@@ -569,9 +1090,14 @@ void App::drawUi() {
     drawMapBrowser();
     ImGui::Separator();
     ImGui::Text("Target .fomap: %zu", _targetFiles.size());
+    static char tgtFilter[64] = "";
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##tgtfilter", "фильтр .fomap...", tgtFilter, sizeof(tgtFilter));
+    const std::string tf = lower(tgtFilter);
     ImGui::BeginChild("tgtlist", ImVec2(0, 120), true);
     for (const auto& f : _targetFiles) {
-        const bool sel = _target.loaded && (_target.name + ".fomap" == f || f.find(_target.name) != std::string::npos);
+        if (!tf.empty() && lower(f).find(tf) == std::string::npos) continue;
+        const bool sel = _target.loaded && (f.find(_target.name) != std::string::npos);
         if (ImGui::Selectable(f.c_str(), sel)) selectTarget(f);
     }
     ImGui::EndChild();
@@ -594,6 +1120,7 @@ void App::drawUi() {
     ImGui::End();
 
     drawWorldWindow();
+    drawSettings();
 }
 
 void App::drawToolbar() {
@@ -649,6 +1176,10 @@ void App::drawToolbar() {
         _worldOpen = true;
     }
     ImGui::SameLine();
+    if (ImGui::Button("Настройки")) {
+        _settingsOpen = true;
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Вписать")) {
         _fitPending = true;
     }
@@ -659,10 +1190,32 @@ void App::drawToolbar() {
 
     if (_loc.grid.elevationCount > 1) {
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(120);
-        if (ImGui::SliderInt("Elevation", &_state.elevation, 0, _loc.grid.elevationCount - 1)) {
+        ImGui::SetNextItemWidth(140);
+        char elevFmt[32];
+        std::snprintf(elevFmt, sizeof(elevFmt), "Уровень: %%d/%d",
+                      _loc.grid.elevationCount - 1);
+        if (ImGui::SliderInt("##elev", &_state.elevation, 0, _loc.grid.elevationCount - 1,
+                             elevFmt)) {
             _gameCache.valid = false;
             _fitPending = true;
+        }
+        ImGui::SameLine();
+        if (_state.elevation == 0) {
+            ImGui::TextDisabled("земля");
+        } else {
+            ImGui::TextDisabled("верх +%d", _state.elevation);
+        }
+        // Диагностика: сколько непустых пол-ячеек на текущем уровне.
+        {
+            const size_t per = static_cast<size_t>(_loc.grid.tileWidth) * _loc.grid.tileHeight;
+            const size_t a = static_cast<size_t>(_state.elevation) * per;
+            const size_t b = a + per;
+            int fc = 0;
+            for (size_t i = a; i < b && i < _loc.tiles.size(); ++i) {
+                if (_loc.tiles[i].tileId > 1) ++fc;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("пол: %d", fc);
         }
     }
 }
@@ -974,7 +1527,31 @@ void App::drawMapCanvas() {
         if (id > 0) {
             if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                 _state.selectedEntity = id;
-                _invOpenFor = id;  // двойной клик по объекту — окно с иконками
+                {
+                    const Entity* pe = nullptr;
+                    for (const auto& x : _loc.entities) { if (x.localId == id) { pe = &x; break; } }
+                    const uint32_t dd = pe != nullptr ? pe->exitDestMap : 0u;
+                    const bool validTarget = pe != nullptr && pe->isExit && dd != 0u && dd != 0xFFFFFFFFu && dd != 0xFFFFFFFEu && dd < 100000u;
+                    if (pe != nullptr && pe->isExit) {
+                        if (validTarget && dd != static_cast<uint32_t>(_loc.mapId)) {
+                            const std::string mf = mapEntryForId(static_cast<int>(dd));
+                            if (!mf.empty()) selectMap(mf);
+                            else _status = "No map id " + std::to_string(dd);
+                        } else if ((pe->exitKind == 2 || pe->exitKind == 3 ||
+                                    pe->exitKind == 4) &&
+                                   pe->exitDestElev >= 0 &&
+                                   pe->exitDestElev < _loc.grid.elevationCount) {
+                            _state.elevation = pe->exitDestElev;  // лестница внутри карты
+                            _gameCache.valid = false;
+                            _fitPending = true;
+                        } else if (validTarget) {
+                            const std::string mf = mapEntryForId(static_cast<int>(dd));
+                            if (!mf.empty()) selectMap(mf);
+                        }
+                    } else {
+                        _invOpenFor = id;
+                    }
+                }
             }
             if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
                 _state.selectedEntity = id;
@@ -1004,7 +1581,9 @@ void App::drawMapCanvas() {
 
     ImGui::SetCursorScreenPos(ImVec2(origin.x + 8, origin.y + 8));
     ImGui::TextColored(ImVec4(0.85f, 0.85f, 0.85f, 1),
-                       "zoom %.2f   колесо — зум, ПКМ/СКМ — пан", _cam.zoom);
+                       "zoom %.2f  floors %zu  objs %zu  elev %d   колесо — зум, ПКМ/СКМ — пан",
+                       _cam.zoom, _gameCache.floors.size(), _gameCache.objects.size(),
+                       _state.elevation);
 
     drawInventoryPopup();
 }
